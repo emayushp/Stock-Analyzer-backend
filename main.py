@@ -90,6 +90,16 @@ class SentimentAnalysis(BaseModel):
     headlines: List[Headline]
 
 
+class PriceTargets(BaseModel):
+    entry: Optional[float]
+    stop_loss: Optional[float]
+    take_profit: Optional[float]
+    risk_reward_ratio: Optional[float]
+    support: Optional[float]
+    resistance: Optional[float]
+    note: str
+
+
 class AnalysisResponse(BaseModel):
     ticker: str
     company_name: str
@@ -97,6 +107,7 @@ class AnalysisResponse(BaseModel):
     currency: str
     market: str
     technical_analysis: TechnicalAnalysis
+    price_targets: PriceTargets
     sentiment_analysis: SentimentAnalysis
     generated_at: str
 
@@ -142,6 +153,97 @@ def compute_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int =
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
+
+
+def compute_atr(hist: pd.DataFrame, length: int = 14) -> pd.Series:
+    """
+    Average True Range — a standard measure of how much a stock typically
+    moves per day. Used below to size stop-loss / take-profit distances off
+    the stock's own volatility rather than an arbitrary percentage.
+    """
+    high, low, close = hist["High"], hist["Low"], hist["Close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return true_range.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+
+
+def compute_price_targets(hist: pd.DataFrame, signal: str, current_price: Optional[float]) -> PriceTargets:
+    """
+    Generates entry/stop-loss/take-profit levels using ATR-based volatility
+    sizing (a standard, well-known technique — not a prediction of where the
+    price will actually go). Support/resistance use the trailing 20-day
+    price range as simple reference levels regardless of signal.
+    """
+    default_note = (
+        "These are calculated reference levels, not a guarantee — no formula can "
+        "promise a maximum profit, since that depends on where the price actually goes."
+    )
+
+    if current_price is None or hist is None or len(hist) < 20:
+        return PriceTargets(
+            entry=None, stop_loss=None, take_profit=None, risk_reward_ratio=None,
+            support=None, resistance=None,
+            note="Not enough price history to calculate reliable levels.",
+        )
+
+    support = round(float(hist["Low"].tail(20).min()), 2)
+    resistance = round(float(hist["High"].tail(20).max()), 2)
+
+    atr_series = compute_atr(hist, length=14).dropna()
+    atr_val = float(atr_series.iloc[-1]) if not atr_series.empty else None
+
+    if atr_val is None or atr_val == 0:
+        return PriceTargets(
+            entry=None, stop_loss=None, take_profit=None, risk_reward_ratio=None,
+            support=support, resistance=resistance,
+            note="Not enough price history to size a volatility-based stop yet. " + default_note,
+        )
+
+    # 1.5x ATR stop, 3x ATR target -> roughly a 2:1 reward-to-risk setup,
+    # a common convention in technical trading.
+    stop_multiplier, target_multiplier = 1.5, 3.0
+
+    if signal == "BUY":
+        entry = current_price
+        stop_loss = round(entry - stop_multiplier * atr_val, 2)
+        take_profit = round(entry + target_multiplier * atr_val, 2)
+        note = (
+            "Entry at current price; stop-loss and take-profit are sized off recent "
+            "volatility (ATR) for roughly a 2:1 reward-to-risk setup. " + default_note
+        )
+    elif signal == "SELL":
+        entry = current_price
+        stop_loss = round(entry + stop_multiplier * atr_val, 2)
+        take_profit = round(entry - target_multiplier * atr_val, 2)
+        note = (
+            "These levels apply to a short position, or as an exit reference if you're "
+            "already holding the stock. " + default_note
+        )
+    else:  # HOLD
+        entry, stop_loss, take_profit = None, None, None
+        note = (
+            "No new entry is suggested while the signal is HOLD. Support and resistance "
+            "below are levels worth watching. " + default_note
+        )
+
+    risk_reward_ratio = None
+    if entry is not None and stop_loss is not None and take_profit is not None:
+        risk = abs(entry - stop_loss)
+        reward = abs(take_profit - entry)
+        if risk > 0:
+            risk_reward_ratio = round(reward / risk, 2)
+
+    return PriceTargets(
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_reward_ratio=risk_reward_ratio,
+        support=support,
+        resistance=resistance,
+        note=note,
+    )
 
 
 def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
@@ -364,6 +466,9 @@ def analyze(ticker: str):
         "CAD" if ticker.endswith((".TO", ".V", ".CN")) else "USD"
     )
     current_price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+    current_price_rounded = round(current_price, 2) if current_price is not None else None
+
+    price_targets = compute_price_targets(hist, technical.signal, current_price_rounded)
 
     headlines = fetch_headlines(stock, limit=5)
     sentiment = analyze_sentiment(headlines)
@@ -371,10 +476,11 @@ def analyze(ticker: str):
     return AnalysisResponse(
         ticker=ticker,
         company_name=company_name,
-        current_price=round(current_price, 2) if current_price is not None else None,
+        current_price=current_price_rounded,
         currency=currency,
         market=detect_market(ticker),
         technical_analysis=technical,
+        price_targets=price_targets,
         sentiment_analysis=sentiment,
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
