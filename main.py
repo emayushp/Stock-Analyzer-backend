@@ -341,7 +341,10 @@ def analyze(ticker: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching data for {ticker}: {e}")
-        raise HTTPException(status_code=502, detail="Failed to reach market data provider.")
+        raise HTTPException(
+            status_code=502,
+            detail="Couldn't reach the market data provider right now (it may be temporarily rate-limiting requests). Please try again in a minute.",
+        )
 
     if hist is None or hist.empty:
         raise HTTPException(
