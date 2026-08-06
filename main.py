@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 import pandas as pd
+import torch
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import pipeline
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
+
+# Fewer threads = less memory overhead from torch's internal thread pool.
+# This machine only has 0.5 CPU on Render's smaller tiers anyway, so there's
+# no performance cost to this.
+torch.set_num_threads(1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stock-analyzer")
@@ -42,12 +48,19 @@ _sentiment_pipeline = None
 def load_model():
     global _sentiment_pipeline
     logger.info("Loading FinBERT model (ProsusAI/finbert)... this can take a moment.")
-    _sentiment_pipeline = pipeline(
-        "sentiment-analysis",
-        model="ProsusAI/finbert",
-        tokenizer="ProsusAI/finbert",
-    )
-    logger.info("FinBERT loaded.")
+
+    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+    model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+
+    # Dynamic int8 quantization: the model's weights are compressed from
+    # 32-bit floats to 8-bit integers after loading. This roughly quarters
+    # the model's memory footprint with only a negligible accuracy cost —
+    # important for fitting inside a 512MB hosting instance.
+    model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+    model.eval()
+
+    _sentiment_pipeline = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
+    logger.info("FinBERT loaded (quantized).")
 
 
 # ---------------------------------------------------------------------------
