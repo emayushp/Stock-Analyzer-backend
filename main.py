@@ -7,6 +7,7 @@ company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,8 +61,25 @@ SCREENER_UNIVERSE = [
     "SHOP.TO", "SU.TO", "CNQ.TO", "ATD.TO", "MFC.TO",
 ]
 
+# A curated set of TSX / TSX-V names that commonly trade under CAD $20 — used
+# by the Brief's "Canadian Stocks Under $20" section. Same rationale as above:
+# a fixed, known list rather than scanning the whole exchange.
+CANADIAN_UNDER_20_UNIVERSE = [
+    "AC.TO", "BB.TO", "CGX.TO", "BTE.TO", "MEG.TO", "NPI.TO", "TOU.TO",
+    "WPM.TO", "KEY.TO", "PEY.TO", "CVE.TO", "BTO.TO", "IMG.TO", "ELD.TO",
+    "AGI.TO", "FM.TO", "TA.TO", "H.TO", "GIB-A.TO", "DOO.TO",
+]
+
 _SCREENER_CACHE: Dict[str, Tuple[float, Any]] = {}
 _SCREENER_TTL_SECONDS = 3600  # 1 hour — screening is not a minute-to-minute activity
+
+_UNDER20_CACHE: Dict[str, Tuple[float, Any]] = {}
+_UNDER20_TTL_SECONDS = 3600
+
+# Ticker/company-name search results change rarely — cache aggressively.
+_SEARCH_CACHE: Dict[str, Tuple[float, list]] = {}
+_SEARCH_CACHE_TTL_SECONDS = 3600
+
 
 
 def cache_get(ticker: str) -> Optional[Dict[str, Any]]:
@@ -145,6 +163,20 @@ class Headline(BaseModel):
     link: Optional[str] = None
     sentiment: str
     sentiment_score: float
+    context: str
+
+
+class EarningsQuarter(BaseModel):
+    date: str
+    eps_estimate: Optional[float]
+    eps_actual: Optional[float]
+    surprise_pct: Optional[float]
+
+
+class EarningsInfo(BaseModel):
+    next_earnings_date: Optional[str]
+    recent_quarters: List[EarningsQuarter]
+    note: str
 
 
 class SentimentAnalysis(BaseModel):
@@ -164,6 +196,7 @@ class AnalysisResponse(BaseModel):
     market: str
     price_history: List[float]
     fundamentals: Fundamentals
+    earnings: EarningsInfo
     technical_analysis: TechnicalAnalysis
     price_targets: PriceTargets
     sentiment_analysis: SentimentAnalysis
@@ -212,6 +245,8 @@ class HoldingResult(BaseModel):
     market_value: Optional[float]
     unrealized_pl: Optional[float]
     unrealized_pl_pct: Optional[float]
+    day_pl: Optional[float]
+    day_pl_pct: Optional[float]
     rsi: Optional[float]
     macd_histogram: Optional[float]
     volume_ratio: Optional[float]
@@ -228,6 +263,8 @@ class PortfolioResponse(BaseModel):
     total_value: float
     total_pl: float
     total_pl_pct: float
+    total_day_pl: float
+    total_day_pl_pct: float
     summary: str
     generated_at: str
 
@@ -242,9 +279,34 @@ class DigestResponse(BaseModel):
     watchlist_signals: List[ScreenerHit]
     opportunities: List[ScreenerHit]
     warnings: List[ScreenerHit]
+    under20_buys: List[ScreenerHit]
+    under20_avoid: List[ScreenerHit]
     headline: str
     note: str
     generated_at: str
+
+
+class SymbolMatch(BaseModel):
+    symbol: str
+    name: str
+    exchange: Optional[str]
+    quote_type: Optional[str]
+
+
+class SearchResponse(BaseModel):
+    query: str
+    results: List[SymbolMatch]
+
+
+class HistoryPoint(BaseModel):
+    date: str
+    close: float
+
+
+class HistoryResponse(BaseModel):
+    ticker: str
+    range: str
+    points: List[HistoryPoint]
 
 
 # ---------------------------------------------------------------------------
@@ -458,20 +520,24 @@ def compute_price_targets(
             "Entry at current price; stop-loss and take-profit are sized off recent "
             "volatility (ATR) for roughly a 2:1 reward-to-risk setup. " + default_note
         )
-    elif signal == "SELL":
-        entry = current_price
-        stop_loss = round(entry + stop_multiplier * atr_val, 2)
-        take_profit = round(entry - target_multiplier * atr_val, 2)
-        note = (
-            "These levels apply to a short position, or as an exit reference if you're "
-            "already holding. " + default_note
-        )
     else:
+        # SELL and HOLD both skip new-entry numbers. A short-sale stop/take-profit
+        # setup here would put stop-loss numerically ABOVE take-profit (correct
+        # for shorting, since you profit from the price falling) — but that reads
+        # as backwards for a long-only investor, which is how this app is used.
         entry = stop_loss = take_profit = None
-        note = (
-            "No new entry is suggested while the signal is HOLD. Support and resistance "
-            "below are levels worth watching. " + default_note
-        )
+        if signal == "SELL":
+            note = (
+                "No new long entry is suggested — momentum has turned negative. If "
+                "you're already holding, support below is a downside level to watch; "
+                "reclaiming resistance would suggest the negative momentum is fading. "
+                + default_note
+            )
+        else:
+            note = (
+                "No new entry is suggested while the signal is HOLD. Support and "
+                "resistance below are levels worth watching. " + default_note
+            )
 
     risk_reward_ratio = None
     if entry is not None and stop_loss is not None and take_profit is not None:
@@ -484,6 +550,56 @@ def compute_price_targets(
         risk_reward_ratio=risk_reward_ratio, support=support,
         resistance=resistance, note=note,
     )
+
+
+def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
+    """
+    Next earnings date plus the last few quarters' EPS estimate vs. actual.
+    Coverage varies a lot by ticker — especially thinner for smaller Canadian
+    names — so this degrades gracefully to "not available" rather than error.
+    """
+    fallback = EarningsInfo(
+        next_earnings_date=None, recent_quarters=[],
+        note="Earnings data isn't available for this ticker.",
+    )
+    try:
+        df = stock.get_earnings_dates(limit=8)
+    except Exception as e:
+        logger.info(f"Earnings fetch skipped: {e}")
+        return fallback
+
+    if df is None or df.empty:
+        return fallback
+
+    try:
+        now = pd.Timestamp.now(tz=df.index.tz) if df.index.tz is not None else pd.Timestamp.now()
+        upcoming = df[df.index > now]
+        past = df[df.index <= now].sort_index(ascending=False)
+
+        next_date = upcoming.index.min().strftime("%Y-%m-%d") if not upcoming.empty else None
+
+        quarters = []
+        for idx, row in past.head(4).iterrows():
+            est = row.get("EPS Estimate")
+            act = row.get("Reported EPS")
+            surprise = row.get("Surprise(%)")
+            quarters.append(
+                EarningsQuarter(
+                    date=idx.strftime("%Y-%m-%d"),
+                    eps_estimate=round(float(est), 2) if pd.notna(est) else None,
+                    eps_actual=round(float(act), 2) if pd.notna(act) else None,
+                    surprise_pct=round(float(surprise), 2) if pd.notna(surprise) else None,
+                )
+            )
+
+        return EarningsInfo(
+            next_earnings_date=next_date,
+            recent_quarters=quarters,
+            note="Beat = actual EPS came in above analyst estimates; miss = below. Large surprises often move price sharply on the report date.",
+        )
+    except Exception as e:
+        logger.warning(f"Earnings parsing failed: {e}")
+        return fallback
 
 
 def build_fundamentals(info: dict, current_price: Optional[float]) -> Fundamentals:
@@ -523,6 +639,61 @@ def build_fundamentals(info: dict, current_price: Optional[float]) -> Fundamenta
         sector=info.get("sector"),
         industry=info.get("industry"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Headline "why it matters" tagging
+#
+# Honest caveat about how this works: FinBERT gives sentiment (positive /
+# negative / neutral), not an understanding of WHY a headline matters. Rather
+# than pretend otherwise, this matches common, well-understood financial-news
+# patterns (earnings beats, guidance cuts, layoffs, M&A, etc.) and explains
+# those specifically. Headlines that don't match a pattern fall back to a
+# sentiment-based explanation — genuinely less specific, and labeled as such.
+# ---------------------------------------------------------------------------
+HEADLINE_PATTERNS = [
+    (r"\bbeat[s]?\b.{0,20}\bestimate|exceed[s]?.{0,20}expectation", "positive",
+     "Earnings or revenue came in above what analysts expected — often supports the price short-term."),
+    (r"\bmiss(?:es|ed)?\b.{0,20}\bestimate|below.{0,20}expectation|fell short", "negative",
+     "Results came in below analyst expectations — often pressures the price short-term."),
+    (r"\braises?\b.{0,20}\bguidance|\bguidance\b.{0,20}\braise|upgrad", "positive",
+     "The company or an analyst raised expectations for future performance."),
+    (r"\bcuts?\b.{0,20}\bguidance|\blowers?\b.{0,20}\bguidance|downgrad|slash", "negative",
+     "Guidance was lowered or an analyst downgraded outlook — signals reduced confidence ahead."),
+    (r"\blayoff|\bjob cuts|\brestructur", "negative",
+     "Workforce reductions often signal cost pressure, though markets sometimes read this as improved efficiency."),
+    (r"\bacqui(?:re|sition)|\bmerger|\bbuyout|\btakeover", "neutral",
+     "M&A activity — impact depends heavily on price paid and strategic fit; can go either way."),
+    (r"\blawsuit|\bsu(?:e|ing|it)\b|\bregulat|\bprobe|\binvestigat|\bfine\b", "negative",
+     "Legal or regulatory scrutiny introduces uncertainty and potential costs."),
+    (r"\brecall\b", "negative",
+     "Product recalls carry direct costs and can dent brand trust."),
+    (r"\bdividend\b.{0,20}\b(?:raise|increase|hike)", "positive",
+     "A dividend increase signals management's confidence in sustained cash flow."),
+    (r"\bdividend\b.{0,20}\b(?:cut|suspend|reduce)", "negative",
+     "A dividend cut often signals real cash-flow strain."),
+    (r"\bprice target\b.{0,20}\braise|\braise[sd]?\b.{0,20}\bprice target", "positive",
+     "An analyst raised their price target — a vote of confidence, though targets are frequently wrong."),
+    (r"\bprice target\b.{0,20}\bcut|\bcut[s]?\b.{0,20}\bprice target|\blower.{0,20}price target", "negative",
+     "An analyst cut their price target — signals reduced confidence, though targets are frequently wrong."),
+    (r"\blaunch|\bunveil|\bnew product", "positive",
+     "New product news can drive near-term attention, though actual sales impact takes longer to show up."),
+]
+
+_COMPILED_PATTERNS = [(re.compile(p, re.IGNORECASE), tone, expl) for p, tone, expl in HEADLINE_PATTERNS]
+
+
+def explain_headline(title: str, sentiment: str) -> str:
+    for pattern, _tone, explanation in _COMPILED_PATTERNS:
+        if pattern.search(title):
+            return explanation
+    # No specific pattern matched — fall back to the sentiment reading alone,
+    # and say so, rather than implying a specific reason that isn't there.
+    if sentiment == "positive":
+        return "Reads positive in tone based on the headline's language — read the full article for the specific reason."
+    if sentiment == "negative":
+        return "Reads negative in tone based on the headline's language — read the full article for the specific reason."
+    return "Tone reads as neutral — no strong positive or negative signal from the headline alone."
 
 
 def extract_headline(item: dict) -> Optional[dict]:
@@ -591,6 +762,7 @@ def analyze_sentiment(headlines: List[dict]) -> SentimentAnalysis:
                 link=h.get("link"),
                 sentiment=label,
                 sentiment_score=round(score, 3),
+                context=explain_headline(h["title"], label),
             )
         )
 
@@ -713,11 +885,12 @@ def sort_hits(hits: List[ScreenerHit]) -> List[ScreenerHit]:
     )
 
 
-def run_screener() -> ScreenerResponse:
-    cached = _SCREENER_CACHE.get("universe")
-    if cached and time.time() - cached[0] < _SCREENER_TTL_SECONDS:
-        payload = cached[1]
-        return ScreenerResponse(**{**payload, "cached": True})
+def run_screener(force: bool = False) -> ScreenerResponse:
+    if not force:
+        cached = _SCREENER_CACHE.get("universe")
+        if cached and time.time() - cached[0] < _SCREENER_TTL_SECONDS:
+            payload = cached[1]
+            return ScreenerResponse(**{**payload, "cached": True})
 
     scored = batch_score(SCREENER_UNIVERSE)
 
@@ -748,6 +921,43 @@ def run_screener() -> ScreenerResponse:
     return response
 
 
+def run_under20_screener(force: bool = False) -> ScreenerResponse:
+    if not force:
+        cached = _UNDER20_CACHE.get("under20")
+        if cached and time.time() - cached[0] < _UNDER20_TTL_SECONDS:
+            payload = cached[1]
+            return ScreenerResponse(**{**payload, "cached": True})
+
+    scored = batch_score(CANADIAN_UNDER_20_UNIVERSE)
+
+    buys, sells = [], []
+    for t, r in scored.items():
+        if r.get("error") or r.get("price") is None or r["price"] >= 20:
+            continue
+        hit = ScreenerHit(**r)
+        if hit.signal == "BUY":
+            buys.append(hit)
+        elif hit.signal == "SELL":
+            sells.append(hit)
+
+    response = ScreenerResponse(
+        buy_candidates=sort_hits(buys),
+        sell_candidates=sort_hits(sells),
+        scanned_count=len([r for r in scored.values() if not r.get("error")]),
+        universe_note=(
+            f"Scanned a fixed list of {len(CANADIAN_UNDER_20_UNIVERSE)} TSX/TSX-V names "
+            "commonly priced under CAD $20 — not the whole exchange. 'Avoid' here means "
+            "negative momentum right now, not a judgment on the business. Low-priced "
+            "stocks are often more volatile; size positions accordingly."
+        ),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        cached=False,
+    )
+
+    _UNDER20_CACHE["under20"] = (time.time(), response.model_dump())
+    return response
+
+
 def describe_holding_context(pl_pct: Optional[float], signal: str) -> str:
     """
     Frames what the indicators say against the position's P/L, without telling
@@ -774,6 +984,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     if not holdings:
         return PortfolioResponse(
             holdings=[], total_cost=0, total_value=0, total_pl=0, total_pl_pct=0,
+            total_day_pl=0, total_day_pl_pct=0,
             summary="No holdings added yet.",
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -797,6 +1008,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
                     ticker=t, shares=h.shares, cost_basis=h.cost_basis,
                     current_price=None, currency=currency, market_value=None,
                     unrealized_pl=None, unrealized_pl_pct=None,
+                    day_pl=None, day_pl_pct=None,
                     rsi=None, macd_histogram=None, volume_ratio=None,
                     signal="HOLD", conviction="Neutral",
                     reasoning="Could not analyze this holding.",
@@ -812,12 +1024,19 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
         pl = value - cost
         pl_pct = round((pl / cost) * 100, 2) if cost else None
 
+        change_pct = r.get("change_pct")
+        day_pl = None
+        if change_pct is not None and price:
+            prev_close = price / (1 + change_pct / 100)
+            day_pl = round(h.shares * (price - prev_close), 2)
+
         results.append(
             HoldingResult(
                 ticker=t, shares=h.shares, cost_basis=h.cost_basis,
                 current_price=price, currency=currency,
                 market_value=round(value, 2),
                 unrealized_pl=round(pl, 2), unrealized_pl_pct=pl_pct,
+                day_pl=day_pl, day_pl_pct=change_pct,
                 rsi=r.get("rsi"), macd_histogram=r.get("macd_histogram"),
                 volume_ratio=r.get("volume_ratio"),
                 signal=r.get("signal", "HOLD"),
@@ -829,6 +1048,10 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
 
     total_pl = total_value - total_cost
     total_pl_pct = round((total_pl / total_cost) * 100, 2) if total_cost else 0.0
+
+    total_day_pl = round(sum(r.day_pl for r in results if r.day_pl is not None), 2)
+    total_value_yesterday = total_value - total_day_pl
+    total_day_pl_pct = round((total_day_pl / total_value_yesterday) * 100, 2) if total_value_yesterday else 0.0
 
     sells = [r.ticker for r in results if r.signal == "SELL"]
     buys = [r.ticker for r in results if r.signal == "BUY"]
@@ -847,9 +1070,57 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
         total_value=round(total_value, 2),
         total_pl=round(total_pl, 2),
         total_pl_pct=total_pl_pct,
+        total_day_pl=total_day_pl,
+        total_day_pl_pct=total_day_pl_pct,
         summary=". ".join(parts) + ".",
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Symbol search — lets people type a company name ("Apple") instead of
+# needing to already know the ticker ("AAPL"). Uses yfinance's own Search
+# module rather than a separate paid API. Cached, since a name-to-symbol
+# mapping essentially never changes.
+# ---------------------------------------------------------------------------
+def search_symbols(query: str) -> List[SymbolMatch]:
+    key = query.strip().lower()
+    if not key:
+        return []
+
+    cached = _SEARCH_CACHE.get(key)
+    if cached and time.time() - cached[0] < _SEARCH_CACHE_TTL_SECONDS:
+        raw = cached[1]
+    else:
+        try:
+            raw = yf.Search(query.strip(), max_results=8).quotes or []
+        except Exception as e:
+            logger.warning(f"Search failed for '{query}': {e}")
+            raw = []
+        _SEARCH_CACHE[key] = (time.time(), raw)
+        if len(_SEARCH_CACHE) > 300:
+            oldest = min(_SEARCH_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _SEARCH_CACHE.pop(oldest, None)
+
+    matches = []
+    for item in raw:
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+        quote_type = (item.get("quoteType") or "").upper()
+        # Stick to things this app can actually analyze.
+        if quote_type not in ("EQUITY", "ETF", ""):
+            continue
+        name = item.get("shortname") or item.get("longname") or symbol
+        matches.append(
+            SymbolMatch(
+                symbol=symbol,
+                name=name,
+                exchange=item.get("exchange"),
+                quote_type=quote_type or None,
+            )
+        )
+    return matches
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +1138,15 @@ def health():
         "model_loaded": _sentiment_pipeline is not None,
         "cached_tickers": len(_CACHE),
     }
+
+
+@app.get("/api/search", response_model=SearchResponse)
+def search(q: str = ""):
+    """Look up tickers by company name or partial symbol, e.g. 'Apple' -> AAPL."""
+    q = q.strip()
+    if len(q) < 2:
+        return SearchResponse(query=q, results=[])
+    return SearchResponse(query=q, results=search_symbols(q))
 
 
 @app.get("/api/analyze/{ticker}", response_model=AnalysisResponse)
@@ -919,6 +1199,7 @@ def analyze(ticker: str):
     price_history = [round(float(v), 2) for v in close.tail(30).tolist()]
 
     fundamentals = build_fundamentals(info, current_price)
+    earnings = fetch_earnings(stock)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
 
     headlines = fetch_headlines(stock, limit=5)
@@ -934,6 +1215,7 @@ def analyze(ticker: str):
         market=detect_market(ticker),
         price_history=price_history,
         fundamentals=fundamentals,
+        earnings=earnings,
         technical_analysis=technical,
         price_targets=price_targets,
         sentiment_analysis=sentiment,
@@ -946,9 +1228,51 @@ def analyze(ticker: str):
 
 
 @app.get("/api/screener", response_model=ScreenerResponse)
-def screener():
+def screener(force: bool = False):
     """Scan the fixed universe for current BUY / SELL technical signals."""
-    return run_screener()
+    return run_screener(force=force)
+
+
+@app.get("/api/screener/under20", response_model=ScreenerResponse)
+def screener_under20(force: bool = False):
+    """Canadian stocks under CAD $20, screened for current momentum signals."""
+    return run_under20_screener(force=force)
+
+
+HISTORY_RANGES = {
+    "1D": ("1d", "5m"),
+    "1W": ("5d", "15m"),
+    "1M": ("1mo", "1d"),
+    "3M": ("3mo", "1d"),
+    "6M": ("6mo", "1d"),
+    "1Y": ("1y", "1d"),
+    "5Y": ("5y", "1wk"),
+}
+
+
+@app.get("/api/history/{ticker}", response_model=HistoryResponse)
+def history(ticker: str, range: str = "3M"):
+    """Price history for the chart, at a selectable timeframe (like Yahoo Finance's range buttons)."""
+    ticker = ticker.strip().upper()
+    range_key = range.strip().upper()
+    period, interval = HISTORY_RANGES.get(range_key, ("3mo", "1d"))
+
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
+    except Exception as e:
+        logger.error(f"History fetch failed for {ticker}: {e}")
+        raise HTTPException(status_code=502, detail="Couldn't fetch price history right now.")
+
+    if hist is None or hist.empty:
+        raise HTTPException(status_code=404, detail=f"No history found for '{ticker}'.")
+
+    close = hist["Close"].dropna()
+    fmt = "%Y-%m-%d %H:%M" if interval in ("5m", "15m") else "%Y-%m-%d"
+    points = [
+        HistoryPoint(date=idx.strftime(fmt), close=round(float(v), 2))
+        for idx, v in close.items()
+    ]
+    return HistoryResponse(ticker=ticker, range=range_key, points=points)
 
 
 @app.post("/api/portfolio/analyze", response_model=PortfolioResponse)
@@ -958,10 +1282,11 @@ def portfolio_analyze(request: PortfolioRequest):
 
 
 @app.post("/api/digest", response_model=DigestResponse)
-def digest(request: DigestRequest):
+def digest(request: DigestRequest, force: bool = False):
     """
     The morning brief: portfolio status, watchlist signals, and screener hits
-    in one call. Technicals only — see the note field.
+    in one call. Technicals only — see the note field. Pass ?force=true to
+    bypass the screener's hourly cache and pull fresh signals.
     """
     portfolio = analyze_portfolio(request.holdings) if request.holdings else None
 
@@ -973,7 +1298,8 @@ def digest(request: DigestRequest):
                 watchlist_signals.append(ScreenerHit(**r))
         watchlist_signals = sort_hits(watchlist_signals)
 
-    screen = run_screener()
+    screen = run_screener(force=force)
+    under20 = run_under20_screener(force=force)
 
     # Don't repeat names the person already holds or watches under "opportunities".
     known = {h.ticker.strip().upper() for h in request.holdings} | {
@@ -981,6 +1307,8 @@ def digest(request: DigestRequest):
     }
     opportunities = [h for h in screen.buy_candidates if h.ticker not in known][:8]
     warnings = [h for h in screen.sell_candidates if h.ticker not in known][:5]
+    under20_buys = [h for h in under20.buy_candidates if h.ticker not in known][:8]
+    under20_avoid = [h for h in under20.sell_candidates if h.ticker not in known][:5]
 
     bits = []
     if portfolio and portfolio.holdings:
@@ -1001,6 +1329,8 @@ def digest(request: DigestRequest):
         watchlist_signals=watchlist_signals,
         opportunities=opportunities,
         warnings=warnings,
+        under20_buys=under20_buys,
+        under20_avoid=under20_avoid,
         headline=headline,
         note=(
             "This brief uses RSI, MACD and volume only — no news sentiment, which is "
