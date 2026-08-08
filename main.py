@@ -52,13 +52,36 @@ _CACHE_TTL_SECONDS = 600
 # which would be far too slow across this many names).
 # ---------------------------------------------------------------------------
 SCREENER_UNIVERSE = [
-    # US large caps
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "WMT",
-    "XOM", "UNH", "MA", "JNJ", "PG", "HD", "COST", "ABBV", "AMD", "NFLX",
-    "CRM", "INTC", "DIS", "BA", "PFE",
-    # Canadian large caps
-    "RY.TO", "TD.TO", "ENB.TO", "CNR.TO", "BMO.TO", "BNS.TO", "CP.TO",
-    "SHOP.TO", "SU.TO", "CNQ.TO", "ATD.TO", "MFC.TO",
+    # US Technology
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "CRM", "ORCL",
+    "ADBE", "CSCO", "IBM", "QCOM", "TXN", "AVGO", "NOW", "INTU", "AMAT",
+    "MU", "INTC", "AMD", "PYPL", "UBER", "ABNB",
+    # US Financials
+    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "AXP", "BLK", "C",
+    # US Healthcare
+    "UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "TMO", "ABT", "BMY", "CVS",
+    # US Consumer
+    "WMT", "HD", "COST", "PG", "KO", "PEP", "MCD", "NKE", "SBUX", "TGT",
+    # US Energy
+    "XOM", "CVX", "COP", "SLB",
+    # US Industrials
+    "BA", "CAT", "GE", "HON", "UPS", "LMT", "RTX",
+    # US Communication
+    "DIS", "NFLX", "CMCSA", "T", "VZ",
+    # Canadian Banks & Financials
+    "RY.TO", "TD.TO", "BMO.TO", "BNS.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO",
+    # Canadian Energy
+    "ENB.TO", "SU.TO", "CNQ.TO", "TRP.TO", "PPL.TO", "CVE.TO",
+    # Canadian Materials
+    "ABX.TO", "FNV.TO", "WPM.TO", "NTR.TO",
+    # Canadian Industrials & Transport
+    "CNR.TO", "CP.TO", "WCN.TO",
+    # Canadian Consumer
+    "ATD.TO", "L.TO", "QSR.TO",
+    # Canadian Tech
+    "SHOP.TO", "CSU.TO", "CLS.TO",
+    # Canadian Telecom
+    "BCE.TO", "T.TO", "RCI-B.TO",
 ]
 
 # A curated set of TSX / TSX-V names that commonly trade under CAD $20 — used
@@ -75,6 +98,10 @@ _SCREENER_TTL_SECONDS = 3600  # 1 hour — screening is not a minute-to-minute a
 
 _UNDER20_CACHE: Dict[str, Tuple[float, Any]] = {}
 _UNDER20_TTL_SECONDS = 3600
+
+# USD/CAD barely moves minute to minute — cache aggressively.
+_FX_CACHE: Dict[str, Tuple[float, float]] = {}
+_FX_TTL_SECONDS = 3600
 
 # Ticker/company-name search results change rarely — cache aggressively.
 _SEARCH_CACHE: Dict[str, Tuple[float, list]] = {}
@@ -265,6 +292,7 @@ class PortfolioResponse(BaseModel):
     total_pl_pct: float
     total_day_pl: float
     total_day_pl_pct: float
+    usd_cad_rate: Optional[float]
     summary: str
     generated_at: str
 
@@ -980,27 +1008,54 @@ def describe_holding_context(pl_pct: Optional[float], signal: str) -> str:
     return f"Down {abs(pl_pct)}%, indicators neutral — no momentum signal either way."
 
 
+def get_usd_cad_rate() -> Optional[float]:
+    """
+    Live USD→CAD rate via Yahoo's CAD=X pair, cached for an hour. Falls back
+    to the last known rate if a fresh fetch fails, rather than breaking the
+    whole portfolio view over a single failed FX lookup.
+    """
+    cached = _FX_CACHE.get("USDCAD")
+    if cached and time.time() - cached[0] < _FX_TTL_SECONDS:
+        return cached[1]
+    try:
+        hist = yf.Ticker("CAD=X").history(period="5d", interval="1d")
+        rate = float(hist["Close"].dropna().iloc[-1]) if hist is not None and not hist.empty else None
+        if rate:
+            _FX_CACHE["USDCAD"] = (time.time(), rate)
+            return rate
+    except Exception as e:
+        logger.warning(f"FX rate fetch failed: {e}")
+    return cached[1] if cached else None
+
+
 def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     if not holdings:
         return PortfolioResponse(
             holdings=[], total_cost=0, total_value=0, total_pl=0, total_pl_pct=0,
-            total_day_pl=0, total_day_pl_pct=0,
+            total_day_pl=0, total_day_pl_pct=0, usd_cad_rate=None,
             summary="No holdings added yet.",
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
 
     tickers = [h.ticker.strip().upper() for h in holdings]
     scored = batch_score(tickers)
+    usd_cad_rate = get_usd_cad_rate()
 
     results: List[HoldingResult] = []
+    # These totals are normalized to CAD so a mixed US/Canadian portfolio adds
+    # up correctly. Each individual holding below still shows its own native
+    # currency (USD price stays in USD) — only the combined totals convert.
     total_cost = total_value = 0.0
+    total_day_pl_cad = 0.0
 
     for h in holdings:
         t = h.ticker.strip().upper()
         r = scored.get(t, {})
         currency = "CAD" if t.endswith((".TO", ".V", ".CN")) else "USD"
-        cost = h.shares * h.cost_basis
-        total_cost += cost
+        fx = usd_cad_rate if (currency == "USD" and usd_cad_rate) else 1.0
+
+        cost_native = h.shares * h.cost_basis
+        total_cost += cost_native * fx
 
         if r.get("error") or r.get("price") is None:
             results.append(
@@ -1019,24 +1074,25 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
             continue
 
         price = r["price"]
-        value = h.shares * price
-        total_value += value
-        pl = value - cost
-        pl_pct = round((pl / cost) * 100, 2) if cost else None
+        value_native = h.shares * price
+        total_value += value_native * fx
+        pl_native = value_native - cost_native
+        pl_pct = round((pl_native / cost_native) * 100, 2) if cost_native else None
 
         change_pct = r.get("change_pct")
-        day_pl = None
+        day_pl_native = None
         if change_pct is not None and price:
             prev_close = price / (1 + change_pct / 100)
-            day_pl = round(h.shares * (price - prev_close), 2)
+            day_pl_native = round(h.shares * (price - prev_close), 2)
+            total_day_pl_cad += day_pl_native * fx
 
         results.append(
             HoldingResult(
                 ticker=t, shares=h.shares, cost_basis=h.cost_basis,
                 current_price=price, currency=currency,
-                market_value=round(value, 2),
-                unrealized_pl=round(pl, 2), unrealized_pl_pct=pl_pct,
-                day_pl=day_pl, day_pl_pct=change_pct,
+                market_value=round(value_native, 2),
+                unrealized_pl=round(pl_native, 2), unrealized_pl_pct=pl_pct,
+                day_pl=day_pl_native, day_pl_pct=change_pct,
                 rsi=r.get("rsi"), macd_histogram=r.get("macd_histogram"),
                 volume_ratio=r.get("volume_ratio"),
                 signal=r.get("signal", "HOLD"),
@@ -1049,7 +1105,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     total_pl = total_value - total_cost
     total_pl_pct = round((total_pl / total_cost) * 100, 2) if total_cost else 0.0
 
-    total_day_pl = round(sum(r.day_pl for r in results if r.day_pl is not None), 2)
+    total_day_pl = round(total_day_pl_cad, 2)
     total_value_yesterday = total_value - total_day_pl
     total_day_pl_pct = round((total_day_pl / total_value_yesterday) * 100, 2) if total_value_yesterday else 0.0
 
@@ -1072,6 +1128,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
         total_pl_pct=total_pl_pct,
         total_day_pl=total_day_pl,
         total_day_pl_pct=total_day_pl_pct,
+        usd_cad_rate=round(usd_cad_rate, 4) if usd_cad_rate else None,
         summary=". ".join(parts) + ".",
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -1305,8 +1362,8 @@ def digest(request: DigestRequest, force: bool = False):
     known = {h.ticker.strip().upper() for h in request.holdings} | {
         t.strip().upper() for t in request.watchlist
     }
-    opportunities = [h for h in screen.buy_candidates if h.ticker not in known][:8]
-    warnings = [h for h in screen.sell_candidates if h.ticker not in known][:5]
+    opportunities = [h for h in screen.buy_candidates if h.ticker not in known][:10]
+    warnings = [h for h in screen.sell_candidates if h.ticker not in known][:10]
     under20_buys = [h for h in under20.buy_candidates if h.ticker not in known][:8]
     under20_avoid = [h for h in under20.sell_candidates if h.ticker not in known][:5]
 
