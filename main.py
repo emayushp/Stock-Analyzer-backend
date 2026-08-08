@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import torch
 import yfinance as yf
@@ -596,6 +597,42 @@ def compute_price_targets(
         risk_reward_ratio=risk_reward_ratio, support=support,
         resistance=resistance, note=note,
     )
+
+
+def apply_earnings_proximity(
+    technical: TechnicalAnalysis, earnings: EarningsInfo
+) -> TechnicalAnalysis:
+    """
+    Downgrade conviction when earnings are imminent.
+
+    This is a guardrail, not a prediction — and the distinction matters. It
+    doesn't claim to know which way the stock will go. It reflects something
+    plainly true: a scheduled event capable of gapping the price 10% overrides
+    whatever RSI and MACD are saying about the prior few weeks. The signal
+    isn't wrong so much as about to be irrelevant.
+    """
+    if not earnings.next_earnings_date:
+        return technical
+
+    try:
+        next_date = datetime.strptime(earnings.next_earnings_date, "%Y-%m-%d").date()
+        days_until = (next_date - datetime.now(timezone.utc).date()).days
+    except Exception:
+        return technical
+
+    if days_until < 0 or days_until > 7:
+        return technical
+
+    downgrade = {"High": "Moderate", "Moderate": "Low", "Low": "Low", "Neutral": "Neutral"}
+    when = "tomorrow" if days_until == 1 else "today" if days_until == 0 else f"in {days_until} days"
+
+    technical.conviction = downgrade.get(technical.conviction, technical.conviction)
+    technical.reasoning = (
+        technical.reasoning
+        + f" Note: earnings are due {when}, which typically overrides technical signals — "
+        "conviction lowered accordingly."
+    )
+    return technical
 
 
 def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
@@ -1275,6 +1312,7 @@ def analyze(ticker: str):
 
     fundamentals = build_fundamentals(info, current_price)
     earnings = fetch_earnings(stock)
+    technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
 
     headlines = fetch_headlines(stock, limit=5)
@@ -1701,6 +1739,32 @@ class VariantComparison(BaseModel):
     generated_at: str
 
 
+def _weekly_trend_flag(close: pd.Series) -> pd.Series:
+    """
+    Is the weekly trend up? Forward-filled to daily.
+
+    LOOK-AHEAD TRAP handled here: the current week is incomplete, so using its
+    close would mean knowing Friday's price on Monday. Shifted by one completed
+    week so only finished bars are used.
+    """
+    try:
+        wk = close.resample("W").last()
+        wk_ema = wk.ewm(span=10, adjust=False).mean()
+        up = (wk > wk_ema).shift(1)
+        return up.reindex(close.index, method="ffill")
+    except Exception:
+        return pd.Series(True, index=close.index)
+
+
+def _relative_strength(close: pd.Series, benchmark: Optional[pd.Series], window: int = 60) -> pd.Series:
+    """Trailing return minus the benchmark's. Positive = outperforming."""
+    if benchmark is None or benchmark.empty:
+        return pd.Series(np.nan, index=close.index)
+    s = close.pct_change(window)
+    b = benchmark.pct_change(window).reindex(close.index, method="ffill")
+    return s - b
+
+
 def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
     try:
         hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
@@ -1730,12 +1794,32 @@ def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
         "vol_avg20": volume.rolling(20).mean(),
     })
     df["vol_ratio"] = df["volume"] / df["vol_avg20"]
+    df["weekly_up"] = _weekly_trend_flag(close)
+
+    # Relative strength vs a market benchmark (S&P 500 for US names, TSX for
+    # Canadian). One extra request per comparison — acceptable here since this
+    # is an on-demand analysis, not something the screener runs in bulk.
+    benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN")) else "^GSPC"
+    benchmark = None
+    try:
+        bh = yf.Ticker(benchmark_symbol).history(period=period, interval="1d", auto_adjust=True)
+        if bh is not None and not bh.empty:
+            benchmark = bh["Close"].dropna()
+    except Exception as e:
+        logger.info(f"Benchmark fetch skipped: {e}")
+    df["rel_strength"] = _relative_strength(close, benchmark)
 
     # Base signal, same rule the live app uses.
     df["base_signal"] = [
         _score_row(r, m) if pd.notna(r) and pd.notna(m) else "HOLD"
         for r, m in zip(df["rsi"], df["macd_hist"])
     ]
+
+    # RSI divergence, aligned to the same index.
+    try:
+        df["divergence"] = detect_divergences(close, rsi)
+    except Exception:
+        df["divergence"] = None
 
     for h in BACKTEST_HORIZONS:
         df[f"fwd{h}"] = df["close"].shift(-h) / df["close"] - 1
@@ -1772,6 +1856,31 @@ def _apply_variant(df: pd.DataFrame, variant: str) -> pd.Series:
         sig = sig.where(~((sig == "SELL") & (df["close"] > df["sma200"])), "HOLD")
         weak = df["vol_ratio"] < 1.0
         sig = sig.where(~(weak & (sig != "HOLD")), "HOLD")
+        return sig
+
+    if variant == "weekly_agree":
+        # Only take a signal the weekly trend agrees with.
+        wk_up = df["weekly_up"].fillna(False).astype(bool)
+        sig = sig.where(~((sig == "BUY") & ~wk_up), "HOLD")
+        sig = sig.where(~((sig == "SELL") & wk_up), "HOLD")
+        return sig
+
+    if variant == "rel_strength":
+        # Only buy names outperforming their index; only sell laggards.
+        rs = df["rel_strength"]
+        sig = sig.where(~((sig == "BUY") & (rs.notna()) & (rs <= 0)), "HOLD")
+        sig = sig.where(~((sig == "SELL") & (rs.notna()) & (rs >= 0)), "HOLD")
+        return sig
+
+    if variant == "divergence_confirm":
+        # Require a supporting RSI divergence within the last 10 bars.
+        div = df.get("divergence")
+        if div is None:
+            return sig
+        bull_recent = (div == "bullish").rolling(10, min_periods=1).max().fillna(0).astype(bool)
+        bear_recent = (div == "bearish").rolling(10, min_periods=1).max().fillna(0).astype(bool)
+        sig = sig.where(~((sig == "BUY") & ~bull_recent), "HOLD")
+        sig = sig.where(~((sig == "SELL") & ~bear_recent), "HOLD")
         return sig
 
     return sig
@@ -1825,6 +1934,9 @@ VARIANT_DEFS = [
     ("trend50", "Only trade with the 50-day trend"),
     ("volume", "Require at-or-above-average volume"),
     ("trend200_volume", "200-day trend AND volume confirmation"),
+    ("weekly_agree", "Require the weekly trend to agree"),
+    ("rel_strength", "Only trade names beating their index"),
+    ("divergence_confirm", "Require a supporting RSI divergence"),
 ]
 
 MIN_RELIABLE_EVENTS = 10
@@ -1893,14 +2005,15 @@ def compare_variants(ticker: str, period: str = "5y") -> VariantComparison:
             )
 
     warning = (
-        "How to read this without fooling yourself. Testing five rule-sets and picking the "
-        "winner is itself a way to overfit — with five variants, one will look best by luck "
-        "fairly often, so a single good result on one stock is not evidence. Before changing "
-        "how you trade, run this on at least 5-10 unrelated tickers and only trust a filter "
-        "that wins consistently across most of them. Also watch the signal count: filters work "
-        "by removing trades, so a variant showing a great edge on 8 signals is far weaker "
-        "evidence than a modest edge on 60. And all of this measures the past — a filter that "
-        "helped in the last few years may simply have suited that period's market."
+        "How to read this without fooling yourself. There are eight rule-sets here, and "
+        "picking whichever looks best is itself a way to overfit — with eight variants, "
+        "the odds that at least one looks good purely by chance are high, well over 50% "
+        "even if none of them work. A single good result on one stock is not evidence. "
+        "Before changing how you trade, run this on at least 5-10 unrelated tickers and "
+        "only trust a filter that wins consistently across most of them. Watch the signal "
+        "count too: filters work by removing trades, so a great edge on 8 signals is far "
+        "weaker evidence than a modest edge on 60. And all of this measures the past — a "
+        "filter that suited the last few years may simply have suited that period's market."
     )
 
     return VariantComparison(
