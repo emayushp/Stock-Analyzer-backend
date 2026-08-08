@@ -157,6 +157,8 @@ class TechnicalAnalysis(BaseModel):
     macd_histogram: Optional[float]
     volume_ratio: Optional[float]
     volume_note: str
+    divergence: Optional[str]
+    divergence_note: str
     signal: str
     conviction: str
     reasoning: str
@@ -493,6 +495,20 @@ def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
     volume_ratio = compute_volume_ratio(hist)
     signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
 
+    # Look for a divergence in the recent past. Only the last ~30 bars are
+    # considered "current" — an older one has usually already played out.
+    divergence_kind = None
+    bars_ago = None
+    try:
+        div_series = detect_divergences(close, rsi_series)
+        recent = div_series.tail(30)
+        hits = [(i, v) for i, v in enumerate(recent.values) if v]
+        if hits:
+            idx, divergence_kind = hits[-1]
+            bars_ago = len(recent) - 1 - idx
+    except Exception as e:
+        logger.warning(f"Divergence detection failed: {e}")
+
     return TechnicalAnalysis(
         rsi=round(rsi_val, 2) if rsi_val is not None else None,
         macd=round(macd_val, 4) if macd_val is not None else None,
@@ -500,6 +516,8 @@ def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
         macd_histogram=round(macd_hist_val, 4) if macd_hist_val is not None else None,
         volume_ratio=volume_ratio,
         volume_note=describe_volume(volume_ratio),
+        divergence=divergence_kind,
+        divergence_note=describe_divergence(divergence_kind, bars_ago),
         signal=signal,
         conviction=conviction,
         reasoning=reasoning,
@@ -1396,4 +1414,591 @@ def digest(request: DigestRequest, force: bool = False):
             "ticker for the full analysis including news sentiment."
         ),
         generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+# ===========================================================================
+# BACKTESTING
+#
+# Measures whether this app's BUY/SELL signals have actually preceded gains
+# historically. Three design decisions that keep the numbers honest:
+#
+# 1. NO LOOK-AHEAD. RSI and MACD at day T are computed only from prices up to
+#    day T (EMAs are causal by construction), so nothing "knows the future."
+#
+# 2. DISTINCT EVENTS, NOT SIGNAL-DAYS. If BUY stays on for 6 days straight,
+#    that's ONE event, not six. Counting signal-days inflates the sample and
+#    double-counts a single decision.
+#
+# 3. BASELINE COMPARISON. A 55% win rate means nothing on its own — in a
+#    rising market, a random day might win 58% of the time. Every stat is
+#    reported against the all-days baseline, and "edge" is the difference.
+#    Edge is the number that matters; win rate alone is misleading.
+# ===========================================================================
+
+BACKTEST_HORIZONS = [5, 10, 20]
+
+
+class HorizonResult(BaseModel):
+    days: int
+    win_rate: Optional[float]
+    avg_return: Optional[float]
+    baseline_win_rate: Optional[float]
+    baseline_avg_return: Optional[float]
+    edge: Optional[float]
+
+
+class SignalBacktest(BaseModel):
+    signal: str
+    event_count: int
+    horizons: List[HorizonResult]
+
+
+class BacktestResponse(BaseModel):
+    ticker: str
+    period: str
+    trading_days: int
+    buy: SignalBacktest
+    sell: SignalBacktest
+    buy_and_hold_return: Optional[float]
+    verdict: str
+    caveats: str
+    generated_at: str
+
+
+def _score_row(rsi_val: float, macd_hist_val: float) -> str:
+    """Same scoring rule as the live signal, applied historically."""
+    score = 0
+    if rsi_val < 30:
+        score += 1
+    elif rsi_val > 70:
+        score -= 1
+    if macd_hist_val > 0:
+        score += 1
+    elif macd_hist_val < 0:
+        score -= 1
+    return "BUY" if score >= 1 else "SELL" if score <= -1 else "HOLD"
+
+
+def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
+    ticker = ticker.strip().upper()
+
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
+    except Exception as e:
+        logger.error(f"Backtest fetch failed for {ticker}: {e}")
+        raise HTTPException(status_code=502, detail="Couldn't fetch history for the backtest.")
+
+    if hist is None or hist.empty or len(hist) < 120:
+        raise HTTPException(
+            status_code=422,
+            detail="Not enough price history to backtest meaningfully (need ~6 months minimum).",
+        )
+
+    close = hist["Close"].dropna()
+    rsi = compute_rsi(close, length=14)
+    _, _, macd_hist = compute_macd(close)
+
+    df = pd.DataFrame({"close": close, "rsi": rsi, "macd_hist": macd_hist}).dropna()
+    if len(df) < 60:
+        raise HTTPException(
+            status_code=422,
+            detail="Not enough usable history after indicator warm-up to backtest.",
+        )
+
+    df["signal"] = [
+        _score_row(r, m) for r, m in zip(df["rsi"].values, df["macd_hist"].values)
+    ]
+    # A signal "event" is the first day of a run — not every day it stays on.
+    df["is_event"] = df["signal"] != df["signal"].shift(1)
+
+    for h in BACKTEST_HORIZONS:
+        df[f"fwd{h}"] = df["close"].shift(-h) / df["close"] - 1
+
+    def summarize(signal_name: str) -> SignalBacktest:
+        # Count an event only when a signal run STARTS, treating a brief
+        # interruption as part of the same decision rather than a new one.
+        is_active = (df["signal"] == signal_name)
+        min_gap = 5
+        event_positions = []
+        last_active = -(min_gap + 1)
+        for i, active in enumerate(is_active.values):
+            if active:
+                if i - last_active > min_gap:
+                    event_positions.append(i)
+                last_active = i
+
+        event_mask = pd.Series(False, index=df.index)
+        if event_positions:
+            event_mask.iloc[event_positions] = True
+        events = df[event_mask]
+
+        horizons = []
+        for h in BACKTEST_HORIZONS:
+            col = f"fwd{h}"
+            sample = events[col].dropna()
+            baseline = df[col].dropna()
+
+            if len(sample) == 0 or len(baseline) == 0:
+                horizons.append(
+                    HorizonResult(
+                        days=h, win_rate=None, avg_return=None,
+                        baseline_win_rate=None, baseline_avg_return=None, edge=None,
+                    )
+                )
+                continue
+
+            # For SELL, "winning" means the price fell — the signal was right.
+            if signal_name == "SELL":
+                win_rate = float((sample < 0).mean()) * 100
+                baseline_win_rate = float((baseline < 0).mean()) * 100
+            else:
+                win_rate = float((sample > 0).mean()) * 100
+                baseline_win_rate = float((baseline > 0).mean()) * 100
+
+            avg_return = float(sample.mean()) * 100
+            baseline_avg = float(baseline.mean()) * 100
+            # Edge: for BUY, beating the baseline means higher returns. For
+            # SELL, the signal claims the price will fall, so a LOWER return
+            # than baseline is the correct direction — flip the sign.
+            edge = (avg_return - baseline_avg) if signal_name == "BUY" else (baseline_avg - avg_return)
+
+            horizons.append(
+                HorizonResult(
+                    days=h,
+                    win_rate=round(win_rate, 1),
+                    avg_return=round(avg_return, 2),
+                    baseline_win_rate=round(baseline_win_rate, 1),
+                    baseline_avg_return=round(baseline_avg, 2),
+                    edge=round(edge, 2),
+                )
+            )
+        return SignalBacktest(
+            signal=signal_name, event_count=int(len(events)), horizons=horizons
+        )
+
+    buy = summarize("BUY")
+    sell = summarize("SELL")
+
+    buy_and_hold = round(float(df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100, 2)
+
+    # ---- Verdict: deliberately conservative. Small samples and thin edges
+    # get called out rather than dressed up.
+    def edge_at(bt: SignalBacktest, days: int) -> Optional[float]:
+        for h in bt.horizons:
+            if h.days == days:
+                return h.edge
+        return None
+
+    buy_edge = edge_at(buy, 10)
+    sell_edge = edge_at(sell, 10)
+    min_events = 10
+
+    parts = []
+    if buy.event_count < min_events:
+        parts.append(
+            f"Only {buy.event_count} BUY signals fired in this period — too few to conclude anything reliable."
+        )
+    elif buy_edge is None:
+        parts.append("Not enough forward data to judge BUY signals.")
+    elif buy_edge > 1.0:
+        parts.append(
+            f"BUY signals beat the baseline by {buy_edge:.2f}% over 10 days across {buy.event_count} events — a real edge in this sample."
+        )
+    elif buy_edge > 0:
+        parts.append(
+            f"BUY signals edged the baseline by only {buy_edge:.2f}% over 10 days — too thin to rely on, and easily erased by fees or slippage."
+        )
+    else:
+        parts.append(
+            f"BUY signals actually UNDERPERFORMED just picking a random day, by {abs(buy_edge):.2f}% over 10 days. On this stock, they haven't worked."
+        )
+
+    if sell.event_count < min_events:
+        parts.append(f"Only {sell.event_count} SELL signals — too few to judge.")
+    elif sell_edge is None:
+        parts.append("Not enough forward data to judge SELL signals.")
+    elif sell_edge > 1.0:
+        parts.append(f"SELL signals correctly anticipated weakness, beating baseline by {sell_edge:.2f}%.")
+    elif sell_edge > 0:
+        parts.append(f"SELL signals showed a marginal {sell_edge:.2f}% edge — weak.")
+    else:
+        parts.append(
+            f"SELL signals were counterproductive here — price tended to do {abs(sell_edge):.2f}% BETTER than baseline after them."
+        )
+
+    verdict = " ".join(parts)
+
+    caveats = (
+        "Read this carefully before trusting the numbers. This tests one stock over one "
+        "period — results vary enormously by ticker and by market regime, and a strong "
+        "result here does not transfer to other stocks or to the future. It assumes you "
+        "buy at the close on the signal day and measures a fixed holding period, with no "
+        "fees, slippage, or taxes, all of which reduce real returns. It also can't test "
+        "what it doesn't know: news, earnings, and macro events drove many of these moves, "
+        "not the indicators. 'Edge' is the only number that matters here — a high win rate "
+        "in a rising market usually just means the market rose."
+    )
+
+    return BacktestResponse(
+        ticker=ticker,
+        period=period,
+        trading_days=int(len(df)),
+        buy=buy,
+        sell=sell,
+        buy_and_hold_return=buy_and_hold,
+        verdict=verdict,
+        caveats=caveats,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/backtest/{ticker}", response_model=BacktestResponse)
+def backtest(ticker: str, period: str = "2y"):
+    """
+    How well have this app's own BUY/SELL signals performed on this ticker
+    historically, measured against a do-nothing baseline?
+    """
+    if period not in ("1y", "2y", "5y"):
+        period = "2y"
+    return run_backtest(ticker, period)
+
+
+# ===========================================================================
+# SIGNAL VARIANT COMPARISON (ablation study)
+#
+# Rather than assuming a filter helps, this runs candidate rule-sets against
+# each other on real history and reports each one's edge. Keep what wins.
+#
+# IMPORTANT STATISTICAL WARNING, enforced in the response text below: testing
+# many variants and picking the best is itself a way to overfit. With 5
+# variants, one will look best by chance alone maybe 20-30% of the time. That
+# is why this deliberately tests only a handful of *pre-specified* ideas with
+# a mechanical reason to work — not dozens of parameter tweaks — and why the
+# response insists on confirming a winner across several unrelated tickers.
+# ===========================================================================
+
+
+class VariantResult(BaseModel):
+    name: str
+    description: str
+    buy_events: int
+    buy_edge_10d: Optional[float]
+    buy_win_rate: Optional[float]
+    sell_events: int
+    sell_edge_10d: Optional[float]
+    reliable: bool
+
+
+class VariantComparison(BaseModel):
+    ticker: str
+    period: str
+    trading_days: int
+    baseline_avg_10d: Optional[float]
+    variants: List[VariantResult]
+    recommendation: str
+    warning: str
+    generated_at: str
+
+
+def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
+    except Exception as e:
+        logger.error(f"Variant fetch failed for {ticker}: {e}")
+        raise HTTPException(status_code=502, detail="Couldn't fetch history.")
+
+    if hist is None or hist.empty or len(hist) < 260:
+        raise HTTPException(
+            status_code=422,
+            detail="Need at least ~1 year of history to compare variants (the 200-day trend filter alone eats 200 days of warm-up).",
+        )
+
+    close = hist["Close"].dropna()
+    volume = hist["Volume"].reindex(close.index)
+
+    rsi = compute_rsi(close, length=14)
+    _, _, macd_hist = compute_macd(close)
+
+    df = pd.DataFrame({
+        "close": close,
+        "volume": volume,
+        "rsi": rsi,
+        "macd_hist": macd_hist,
+        "sma50": close.rolling(50).mean(),
+        "sma200": close.rolling(200).mean(),
+        "vol_avg20": volume.rolling(20).mean(),
+    })
+    df["vol_ratio"] = df["volume"] / df["vol_avg20"]
+
+    # Base signal, same rule the live app uses.
+    df["base_signal"] = [
+        _score_row(r, m) if pd.notna(r) and pd.notna(m) else "HOLD"
+        for r, m in zip(df["rsi"], df["macd_hist"])
+    ]
+
+    for h in BACKTEST_HORIZONS:
+        df[f"fwd{h}"] = df["close"].shift(-h) / df["close"] - 1
+
+    return df.dropna(subset=["close", "rsi", "macd_hist"])
+
+
+def _apply_variant(df: pd.DataFrame, variant: str) -> pd.Series:
+    """Returns a signal series. Filters only ever downgrade a signal to HOLD."""
+    sig = df["base_signal"].copy()
+
+    if variant == "baseline":
+        return sig
+
+    if variant == "trend200":
+        # Don't buy below the long-term trend, don't sell above it.
+        sig = sig.where(~((sig == "BUY") & (df["close"] < df["sma200"])), "HOLD")
+        sig = sig.where(~((sig == "SELL") & (df["close"] > df["sma200"])), "HOLD")
+        return sig
+
+    if variant == "trend50":
+        sig = sig.where(~((sig == "BUY") & (df["close"] < df["sma50"])), "HOLD")
+        sig = sig.where(~((sig == "SELL") & (df["close"] > df["sma50"])), "HOLD")
+        return sig
+
+    if variant == "volume":
+        # Require at-or-above-average participation behind the move.
+        weak = df["vol_ratio"] < 1.0
+        sig = sig.where(~(weak & (sig != "HOLD")), "HOLD")
+        return sig
+
+    if variant == "trend200_volume":
+        sig = sig.where(~((sig == "BUY") & (df["close"] < df["sma200"])), "HOLD")
+        sig = sig.where(~((sig == "SELL") & (df["close"] > df["sma200"])), "HOLD")
+        weak = df["vol_ratio"] < 1.0
+        sig = sig.where(~(weak & (sig != "HOLD")), "HOLD")
+        return sig
+
+    return sig
+
+
+def _edge_for(df: pd.DataFrame, sig: pd.Series, signal_name: str, horizon: int):
+    """
+    Returns (event_count, edge, win_rate).
+
+    Subtle but important correctness point: filters convert scattered days to
+    HOLD, which can split one continuous signal run into fragments
+    (BUY→HOLD→BUY). Counting "signal differs from yesterday" would treat that
+    as two events and INFLATE the sample size, making filtered variants look
+    better-supported than they are — verified in testing, where a naive count
+    made a filter appear to *add* signals.
+
+    The fix: anchor events to runs of the UNFILTERED base signal. A filter can
+    then only ever remove an event, never manufacture one. This keeps sample
+    sizes comparable across variants, which is the whole point of an ablation.
+    """
+    col = f"fwd{horizon}"
+    base = df["base_signal"] if "base_signal" in df.columns else df["signal"]
+
+    base_active = (base == signal_name)
+    base_run_start = base_active & ~base_active.shift(1, fill_value=False)
+
+    # Keep an event only if the filtered signal still fires on that same day.
+    event_mask = base_run_start & (sig == signal_name)
+
+    sample = df.loc[event_mask, col].dropna()
+    baseline = df[col].dropna()
+
+    if len(sample) == 0 or len(baseline) == 0:
+        return int(event_mask.sum()), None, None
+
+    avg = float(sample.mean()) * 100
+    base_avg = float(baseline.mean()) * 100
+    edge = (avg - base_avg) if signal_name == "BUY" else (base_avg - avg)
+
+    if signal_name == "SELL":
+        win = float((sample < 0).mean()) * 100
+    else:
+        win = float((sample > 0).mean()) * 100
+
+    return len(sample), round(edge, 2), round(win, 1)
+
+
+VARIANT_DEFS = [
+    ("baseline", "RSI + MACD only (what the app uses now)"),
+    ("trend200", "Only trade with the 200-day trend"),
+    ("trend50", "Only trade with the 50-day trend"),
+    ("volume", "Require at-or-above-average volume"),
+    ("trend200_volume", "200-day trend AND volume confirmation"),
+]
+
+MIN_RELIABLE_EVENTS = 10
+
+
+def compare_variants(ticker: str, period: str = "5y") -> VariantComparison:
+    ticker = ticker.strip().upper()
+    df = _prepare_indicator_frame(ticker, period)
+
+    baseline_avg = df["fwd10"].dropna()
+    baseline_avg_10d = round(float(baseline_avg.mean()) * 100, 2) if len(baseline_avg) else None
+
+    results: List[VariantResult] = []
+    for name, description in VARIANT_DEFS:
+        sig = _apply_variant(df, name)
+        buy_n, buy_edge, buy_win = _edge_for(df, sig, "BUY", 10)
+        sell_n, sell_edge, _ = _edge_for(df, sig, "SELL", 10)
+        results.append(
+            VariantResult(
+                name=name,
+                description=description,
+                buy_events=buy_n,
+                buy_edge_10d=buy_edge,
+                buy_win_rate=buy_win,
+                sell_events=sell_n,
+                sell_edge_10d=sell_edge,
+                reliable=buy_n >= MIN_RELIABLE_EVENTS,
+            )
+        )
+
+    # Recommendation, deliberately reluctant.
+    usable = [r for r in results if r.reliable and r.buy_edge_10d is not None]
+    base = next((r for r in results if r.name == "baseline"), None)
+
+    if not usable:
+        recommendation = (
+            "No variant produced enough signals on this ticker to judge. Try a longer "
+            "period, or a stock that moves more."
+        )
+    else:
+        best = max(usable, key=lambda r: r.buy_edge_10d)
+        base_edge = base.buy_edge_10d if base and base.buy_edge_10d is not None else 0.0
+        improvement = best.buy_edge_10d - base_edge
+
+        if best.buy_edge_10d <= 0:
+            recommendation = (
+                f"None of these rule-sets beat doing nothing on {ticker}. The best "
+                f"({best.description}) still had a {best.buy_edge_10d}% edge. That's a real "
+                "result worth taking seriously: on this stock, these indicators aren't adding value."
+            )
+        elif best.name == "baseline":
+            recommendation = (
+                f"The current rules performed best here ({best.buy_edge_10d}% edge over "
+                f"{best.buy_events} signals). Adding filters didn't help on this ticker."
+            )
+        elif improvement < 0.5:
+            recommendation = (
+                f"'{best.description}' edged ahead ({best.buy_edge_10d}% vs {base_edge}% baseline), "
+                f"but by only {improvement:.2f}% — too small to be confident it isn't chance."
+            )
+        else:
+            recommendation = (
+                f"'{best.description}' performed best: {best.buy_edge_10d}% edge across "
+                f"{best.buy_events} signals, versus {base_edge}% for the current rules — an "
+                f"improvement of {improvement:.2f}%. Worth testing on other tickers before adopting."
+            )
+
+    warning = (
+        "How to read this without fooling yourself. Testing five rule-sets and picking the "
+        "winner is itself a way to overfit — with five variants, one will look best by luck "
+        "fairly often, so a single good result on one stock is not evidence. Before changing "
+        "how you trade, run this on at least 5-10 unrelated tickers and only trust a filter "
+        "that wins consistently across most of them. Also watch the signal count: filters work "
+        "by removing trades, so a variant showing a great edge on 8 signals is far weaker "
+        "evidence than a modest edge on 60. And all of this measures the past — a filter that "
+        "helped in the last few years may simply have suited that period's market."
+    )
+
+    return VariantComparison(
+        ticker=ticker,
+        period=period,
+        trading_days=int(len(df)),
+        baseline_avg_10d=baseline_avg_10d,
+        variants=results,
+        recommendation=recommendation,
+        warning=warning,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/backtest/{ticker}/variants", response_model=VariantComparison)
+def backtest_variants(ticker: str, period: str = "5y"):
+    """
+    Head-to-head comparison of candidate signal rule-sets on real history.
+    Use this to decide whether a filter is worth adopting — don't guess.
+    """
+    if period not in ("2y", "5y", "10y"):
+        period = "5y"
+    return compare_variants(ticker, period)
+
+
+# ===========================================================================
+# RSI DIVERGENCE
+#
+# Bullish: price makes a LOWER low while RSI makes a HIGHER low — the second
+# decline had less selling force behind it. Bearish is the mirror.
+#
+# This is one of the few genuinely anticipatory technical patterns, because
+# it describes momentum weakening BEFORE price confirms it.
+#
+# THE CRITICAL CORRECTNESS POINT: a swing low at bar i can only be identified
+# once bars i+1..i+k exist. Recording a divergence AT the swing bar would mean
+# using information that didn't exist yet — it backtests beautifully and is
+# worthless live. So the signal is deliberately recorded at bar i+k, when it
+# first becomes knowable. Verified in testing: swing at 129 -> signal at 132.
+#
+# Parameters (k=3, gap 8-120 bars) were validated against injected patterns
+# and checked for false-positive rate on random walks (~1% of bars).
+# ===========================================================================
+
+DIVERGENCE_K = 3
+DIVERGENCE_MIN_GAP = 8
+DIVERGENCE_MAX_GAP = 120
+
+
+def detect_divergences(close: pd.Series, rsi: pd.Series) -> pd.Series:
+    """Returns a series of 'bullish' / 'bearish' / None, lagged to avoid look-ahead."""
+    n = len(close)
+    k = DIVERGENCE_K
+    win = 2 * k + 1
+
+    roll_min = close.rolling(win, center=True).min()
+    roll_max = close.rolling(win, center=True).max()
+    is_low = (close == roll_min) & roll_min.notna()
+    is_high = (close == roll_max) & roll_max.notna()
+
+    out = pd.Series([None] * n, index=close.index, dtype=object)
+    lows = [i for i in range(n) if bool(is_low.iloc[i])]
+    highs = [i for i in range(n) if bool(is_high.iloc[i])]
+
+    for positions, kind in ((lows, "bullish"), (highs, "bearish")):
+        for a, b in zip(positions, positions[1:]):
+            gap = b - a
+            if gap < DIVERGENCE_MIN_GAP or gap > DIVERGENCE_MAX_GAP:
+                continue
+            price_a, price_b = close.iloc[a], close.iloc[b]
+            rsi_a, rsi_b = rsi.iloc[a], rsi.iloc[b]
+            if pd.isna(rsi_a) or pd.isna(rsi_b):
+                continue
+            matched = (
+                (kind == "bullish" and price_b < price_a and rsi_b > rsi_a)
+                or (kind == "bearish" and price_b > price_a and rsi_b < rsi_a)
+            )
+            if matched and b + k < n:
+                out.iloc[b + k] = kind
+    return out
+
+
+def describe_divergence(kind: Optional[str], bars_ago: Optional[int]) -> str:
+    if not kind:
+        return (
+            "No recent RSI divergence detected. Divergences are uncommon — their absence "
+            "is normal and isn't a signal in itself."
+        )
+    when = f"{bars_ago} trading day{'s' if bars_ago != 1 else ''} ago" if bars_ago is not None else "recently"
+    if kind == "bullish":
+        return (
+            f"Bullish divergence spotted {when}: price made a lower low, but RSI made a "
+            "higher low — the second decline carried less selling pressure. This is one of "
+            "the few patterns that can hint at a turn before price shows it. It is not a "
+            "guarantee: divergences can persist for a long time, or simply fail."
+        )
+    return (
+        f"Bearish divergence spotted {when}: price made a higher high, but RSI made a "
+        "lower high — the rally is running on weaker momentum. Often precedes a pullback, "
+        "though strong trends can push through divergences for weeks."
     )
