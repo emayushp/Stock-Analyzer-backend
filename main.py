@@ -227,6 +227,7 @@ class AnalysisResponse(BaseModel):
     price_history: List[float]
     fundamentals: Fundamentals
     quality: "QualityScore"
+    data_quality: "DataQuality"
     regime: "MarketRegime"
     earnings: EarningsInfo
     technical_analysis: TechnicalAnalysis
@@ -1333,6 +1334,16 @@ def analyze(ticker: str):
 
     fundamentals = build_fundamentals(info, current_price)
     quality = compute_quality_score(info)
+    data_quality = assess_data_quality(ticker, hist, info)
+
+    # A signal computed on thin data shouldn't carry the same weight as one
+    # computed on a liquid name, regardless of how clean the numbers look.
+    if data_quality.reliability == "Poor":
+        technical.conviction = "Low"
+        technical.reasoning += " Conviction capped at Low: this listing trades too thinly for the indicators to be dependable."
+    elif data_quality.reliability == "Fair" and technical.conviction == "High":
+        technical.conviction = "Moderate"
+
     regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
     earnings = fetch_earnings(stock)
     technical = apply_earnings_proximity(technical, earnings)
@@ -1352,6 +1363,7 @@ def analyze(ticker: str):
         price_history=price_history,
         fundamentals=fundamentals,
         quality=quality,
+        data_quality=data_quality,
         regime=regime,
         earnings=earnings,
         technical_analysis=technical,
@@ -1523,6 +1535,8 @@ class SignalBacktest(BaseModel):
     signal: str
     event_count: int
     horizons: List[HorizonResult]
+    plain_summary: str = ""
+    plain_result: str = ""
 
 
 class BacktestResponse(BaseModel):
@@ -1549,6 +1563,101 @@ def _score_row(rsi_val: float, macd_hist_val: float) -> str:
     elif macd_hist_val < 0:
         score -= 1
     return "BUY" if score >= 1 else "SELL" if score <= -1 else "HOLD"
+
+
+
+def _plain_signal_summary(signal_name: str, event_count: int, horizons: List[HorizonResult],
+                          period: str) -> Tuple[str, str]:
+    """
+    Turns the statistics into two plain sentences: what happened, and whether
+    it means anything. No jargon — no "edge", no "baseline", no percentages
+    of percentages.
+    """
+    years = {"1y": "year", "2y": "2 years", "5y": "5 years"}.get(period, period)
+    word = "buy" if signal_name == "BUY" else "sell"
+
+    if event_count == 0:
+        return (f"The app never said {word.upper()} on this stock in the last {years}.", "")
+
+    ten = next((h for h in horizons if h.days == 10), None)
+    if ten is None or ten.win_rate is None:
+        return (f"The app said {word.upper()} {event_count} times in the last {years}.",
+                "There isn't enough recent data to see how those turned out yet.")
+
+    direction = "higher" if signal_name == "BUY" else "lower"
+    summary = (
+        f"The app said {word.upper()} {event_count} times in the last {years}. "
+        f"Two weeks later, the price was {direction} {ten.win_rate:.0f} times out of 100. "
+        f"On a random day picked out of a hat, it would have been {direction} "
+        f"{ten.baseline_win_rate:.0f} times out of 100."
+    )
+
+    gap = ten.edge if ten.edge is not None else 0
+    net = ten.net_edge if ten.net_edge is not None else gap
+
+    if event_count < 10:
+        result = (
+            f"That said, {event_count} is a small number of times to judge anything by. "
+            "Treat this as a hint, not a finding."
+        )
+    elif net > 0.5:
+        result = (
+            f"So the signal did genuinely better than guessing — and it still holds up "
+            f"after the cost of buying and selling. This one looks useful on this stock."
+        )
+    elif gap > 0:
+        result = (
+            "So the signal did slightly better than guessing, but the gap is small enough "
+            "that commission and the buy/sell spread would eat it. Not worth trading on."
+        )
+    else:
+        result = (
+            "So the signal actually did worse than guessing. On this stock, following it "
+            "would have cost you money rather than made you money."
+        )
+    return summary, result
+
+
+def _plain_variant(description: str, edge: Optional[float], base_edge: Optional[float],
+                   events: int) -> str:
+    if edge is None or events == 0:
+        return f"{description}: not enough signals to tell."
+    if events < 10:
+        return f"{description}: only {events} signals — too few to judge."
+    if base_edge is None:
+        base_edge = 0.0
+    diff = edge - base_edge
+    if diff > 0.5:
+        return f"{description}: did better than the app's current rules here."
+    if diff > 0:
+        return f"{description}: barely different from the current rules."
+    return f"{description}: did worse than the current rules."
+
+
+def _plain_aggregate(description: str, wins: int, tested: int, mean_edge: Optional[float],
+                     p_value: Optional[float], mean_signals: Optional[float],
+                     is_baseline: bool) -> str:
+    if is_baseline:
+        return "This is what the app does today — everything else is compared against it."
+    if tested == 0:
+        return f"{description}: couldn't be tested."
+    if mean_signals is not None and mean_signals < 10:
+        return (
+            f"{description}: filters out so many trades that only about "
+            f"{mean_signals:.0f} signals are left per stock — not enough to judge."
+        )
+    if p_value is not None and p_value < 0.05 and (mean_edge or 0) > 0:
+        return (
+            f"{description}: did better on {wins} of {tested} stocks. That's a strong "
+            "enough pattern that it's unlikely to be a fluke — this one looks real."
+        )
+    if wins > tested / 2:
+        return (
+            f"{description}: did better on {wins} of {tested} stocks. That sounds "
+            "promising, but when you try this many different ideas, one of them looks "
+            "good by luck almost every time. Not enough to act on."
+        )
+    return f"{description}: did better on only {wins} of {tested} stocks. No sign it helps."
 
 
 def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
@@ -1646,8 +1755,12 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
                     net_edge=round(edge - ROUND_TRIP_COST_PCT, 2),
                 )
             )
+        plain_summary, plain_result = _plain_signal_summary(
+            signal_name, int(len(events)), horizons, period
+        )
         return SignalBacktest(
-            signal=signal_name, event_count=int(len(events)), horizons=horizons
+            signal=signal_name, event_count=int(len(events)), horizons=horizons,
+            plain_summary=plain_summary, plain_result=plain_result,
         )
 
     buy = summarize("BUY")
@@ -1707,14 +1820,14 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
     verdict = " ".join(parts)
 
     caveats = (
-        "Read this carefully before trusting the numbers. This tests one stock over one "
-        "period — results vary enormously by ticker and by market regime, and a strong "
-        "result here does not transfer to other stocks or to the future. It assumes you "
-        "buy at the close on the signal day and measures a fixed holding period, with no "
-        "fees, slippage, or taxes, all of which reduce real returns. It also can't test "
-        "what it doesn't know: news, earnings, and macro events drove many of these moves, "
-        "not the indicators. 'Edge' is the only number that matters here — a high win rate "
-        "in a rising market usually just means the market rose."
+        "A few things worth knowing before you trust this. It only looks at one stock over "
+        "one stretch of time — a good result here says nothing about other stocks, or about "
+        "next month. It assumes you buy at the closing price on the day the signal appears "
+        "and sell a fixed number of days later, which is tidier than real life. It ignores "
+        "taxes. And it can't see the reasons behind any of the moves: earnings, news and "
+        "interest rates drove a lot of what happened, not the chart patterns. The number "
+        "that matters is the comparison against random days — a signal that wins 60% of the "
+        "time sounds great until you learn that random days won 58% of the time."
     )
 
     return BacktestResponse(
@@ -1757,6 +1870,7 @@ def backtest(ticker: str, period: str = "2y"):
 
 
 class VariantResult(BaseModel):
+    plain: str = ""
     name: str
     description: str
     buy_events: int
@@ -2008,8 +2122,11 @@ def compare_variants(ticker: str, period: str = "5y") -> VariantComparison:
         sig = _apply_variant(df, name)
         buy_n, buy_edge, buy_win = _edge_for(df, sig, "BUY", 10)
         sell_n, sell_edge, _ = _edge_for(df, sig, "SELL", 10)
+        base_ref = next((r for r in results if r.name == "baseline"), None)
         results.append(
             VariantResult(
+                plain=_plain_variant(description, buy_edge,
+                                     base_ref.buy_edge_10d if base_ref else None, buy_n),
                 name=name,
                 description=description,
                 buy_events=buy_n,
@@ -2037,37 +2154,35 @@ def compare_variants(ticker: str, period: str = "5y") -> VariantComparison:
 
         if best.buy_edge_10d <= 0:
             recommendation = (
-                f"None of these rule-sets beat doing nothing on {ticker}. The best "
-                f"({best.description}) still had a {best.buy_edge_10d}% edge. That's a real "
-                "result worth taking seriously: on this stock, these indicators aren't adding value."
+                f"None of these ways of filtering the signals beat simply guessing on {ticker}. "
+                "That's genuinely useful to know: on this stock, these chart patterns aren't "
+                "telling you anything."
             )
         elif best.name == "baseline":
             recommendation = (
-                f"The current rules performed best here ({best.buy_edge_10d}% edge over "
-                f"{best.buy_events} signals). Adding filters didn't help on this ticker."
+                "The app's current rules did best here. Adding extra filters made things worse, "
+                "not better, on this stock."
             )
         elif improvement < 0.5:
             recommendation = (
-                f"'{best.description}' edged ahead ({best.buy_edge_10d}% vs {base_edge}% baseline), "
-                f"but by only {improvement:.2f}% — too small to be confident it isn't chance."
+                f"'{best.description}' came out slightly ahead, but by so little that it could "
+                "easily be chance. Not a reason to change anything."
             )
         else:
             recommendation = (
-                f"'{best.description}' performed best: {best.buy_edge_10d}% edge across "
-                f"{best.buy_events} signals, versus {base_edge}% for the current rules — an "
-                f"improvement of {improvement:.2f}%. Worth testing on other tickers before adopting."
+                f"'{best.description}' did noticeably better than the current rules on this "
+                "stock. Worth checking against other stocks before reading much into it — one "
+                "stock proves nothing."
             )
 
     warning = (
-        "How to read this without fooling yourself. There are eight rule-sets here, and "
-        "picking whichever looks best is itself a way to overfit — with eight variants, "
-        "the odds that at least one looks good purely by chance are high, well over 50% "
-        "even if none of them work. A single good result on one stock is not evidence. "
-        "Before changing how you trade, run this on at least 5-10 unrelated tickers and "
-        "only trust a filter that wins consistently across most of them. Watch the signal "
-        "count too: filters work by removing trades, so a great edge on 8 signals is far "
-        "weaker evidence than a modest edge on 60. And all of this measures the past — a "
-        "filter that suited the last few years may simply have suited that period's market."
+        "One important catch. There are eight different filters being tried here, and when "
+        "you try eight ideas, one of them usually looks good by pure luck — even if none of "
+        "them actually work. So a single good result on a single stock means very little. "
+        "Use the 'test across 12 stocks' button below to see whether anything holds up more "
+        "widely. Also watch how many signals are left: a filter works by throwing trades "
+        "away, so a great-looking result based on 8 trades is much weaker evidence than a "
+        "modest one based on 60."
     )
 
     return VariantComparison(
@@ -2198,6 +2313,7 @@ DEFAULT_BASKET = [
 
 
 class AggregateVariantResult(BaseModel):
+    plain: str = ""
     name: str
     description: str
     tickers_tested: int
@@ -2274,6 +2390,7 @@ def aggregate_variants(tickers: List[str], period: str = "5y") -> AggregateCompa
         if not rows:
             results.append(
                 AggregateVariantResult(
+                    plain=f"{description}: couldn't be tested.",
                     name=name, description=description, tickers_tested=0,
                     tickers_beating_baseline=0, mean_edge=None, median_edge=None,
                     mean_signals_per_ticker=None, p_value=None, significant=False,
@@ -2324,6 +2441,8 @@ def aggregate_variants(tickers: List[str], period: str = "5y") -> AggregateCompa
 
         results.append(
             AggregateVariantResult(
+                plain=_plain_aggregate(description, wins, n, mean_edge,
+                                       p_value, mean_signals, name == "baseline"),
                 name=name, description=description, tickers_tested=n,
                 tickers_beating_baseline=wins, mean_edge=round(mean_edge, 2),
                 median_edge=round(median_edge, 2),
@@ -2338,29 +2457,31 @@ def aggregate_variants(tickers: List[str], period: str = "5y") -> AggregateCompa
         conclusion = "No tickers could be analyzed. Try again, or use a different basket."
     elif not winners:
         conclusion = (
-            f"Across {len(analyzed)} tickers, no filter improved on the current rules by "
-            "enough to rule out chance. That is a legitimate and common result — it means "
-            "leave the signal logic alone rather than adopting something that only looked "
-            "good on a handful of stocks."
+            f"Tested across {len(analyzed)} different stocks, none of the eight filters "
+            "reliably beat what the app already does. This is the most common outcome, and "
+            "it's a real answer rather than a failure: it means don't change anything. "
+            "Chart-based signals mostly have very thin edges, and a filter that shone on one "
+            "or two stocks was almost certainly luck."
         )
     else:
         best = max(winners, key=lambda r: r.mean_edge)
         conclusion = (
-            f"'{best.description}' is the one filter that holds up: it beat the current rules "
-            f"on {best.tickers_beating_baseline} of {best.tickers_tested} tickers, mean edge "
-            f"{best.mean_edge:+.2f}%, still significant after correcting for the number of "
-            f"filters tested (p={best.p_value:.3f}). This is the one worth adopting."
+            f"One filter stands out: {best.description.lower()}. It beat the app's current "
+            f"rules on {best.tickers_beating_baseline} of {best.tickers_tested} stocks — a "
+            "wide enough pattern that it's unlikely to be luck, even allowing for the fact "
+            "that eight ideas were tried. This is the one worth taking seriously."
         )
 
     method_note = (
-        "Method, so you can judge it yourself. Each filter is scored on how many tickers it "
-        "beat the current rules on, then tested against the null hypothesis that it's a coin "
-        "flip (binomial test). The p-value is Bonferroni-corrected for the number of filters "
-        "tried, because testing eight ideas and reporting the best without correction is how "
-        "false discoveries happen. A filter needs corrected p < 0.05 AND a positive mean edge "
-        "AND at least ~10 signals per ticker to be called real. This is still backward-looking "
-        "and uses one holding period with no fees — it narrows what's worth trying, it doesn't "
-        "prove anything will keep working."
+        "How this works, in plain terms. Each filter is tried on every stock, and we count "
+        "how many stocks it beat the app's current rules on. Then we ask: if this filter "
+        "were useless and we were just flipping coins, how often would it look this good by "
+        "accident? Because eight filters are being tried at once, the bar is set higher than "
+        "it would be for a single one — otherwise something always wins by chance. A filter "
+        "only gets recommended if it wins on most stocks, keeps enough trades to be worth "
+        "measuring, and clears that raised bar. All of this looks backwards at what already "
+        "happened, so it narrows down what's worth trying rather than proving anything about "
+        "the future."
     )
 
     return AggregateComparison(
@@ -2769,3 +2890,115 @@ def quotes(tickers: str = ""):
                 results.append(Quote(ticker=s, price=None, currency="USD", error="Fetch failed"))
 
     return QuotesResponse(quotes=results, generated_at=datetime.now(timezone.utc).isoformat())
+
+
+# ===========================================================================
+# DATA QUALITY / SIGNAL RELIABILITY
+#
+# Prompted by a real case: Tesla showed BUY while a CAD-hedged Tesla product
+# showed SELL. Both can't be describing Tesla. The hedged product trades a
+# fraction of the volume, so RSI and MACD end up measuring the fund's own
+# liquidity quirks — wide spreads, sparse trades, tracking error — rather
+# than the underlying business.
+#
+# Technical indicators assume a liquid, continuously-priced market. When that
+# assumption breaks, the numbers still compute and look authoritative. This
+# flags when they shouldn't be trusted.
+# ===========================================================================
+
+class DataQuality(BaseModel):
+    reliability: str            # "Good" | "Fair" | "Poor"
+    avg_daily_volume: Optional[int]
+    instrument_type: Optional[str]
+    is_derivative: bool
+    warnings: List[str]
+    note: str
+
+
+DERIVATIVE_HINTS = (
+    "HEDGED", "CAD-HEDGED", "ETF", "ETN", "TRUST", "INDEX", "2X", "3X",
+    "BULL", "BEAR", "INVERSE", "LEVERAGED",
+)
+
+
+def assess_data_quality(
+    ticker: str, hist: pd.DataFrame, info: dict
+) -> DataQuality:
+    warnings: List[str] = []
+    quote_type = (info.get("quoteType") or "").upper() or None
+    long_name = (info.get("longName") or info.get("shortName") or "").upper()
+
+    avg_vol = None
+    if "Volume" in hist and len(hist) >= 20:
+        try:
+            avg_vol = int(hist["Volume"].tail(60).mean())
+        except Exception:
+            avg_vol = None
+
+    is_derivative = (
+        quote_type in ("ETF", "MUTUALFUND")
+        or any(hint in long_name for hint in DERIVATIVE_HINTS)
+    )
+
+    score = 0
+
+    # Volume is the main driver — thin trading makes every indicator noisier.
+    if avg_vol is None:
+        warnings.append("Volume data unavailable, so signal confidence can't be assessed.")
+        score += 2
+    elif avg_vol < 50_000:
+        warnings.append(
+            f"Very thin trading (~{avg_vol:,} shares/day). At this volume, RSI and MACD are "
+            "largely measuring the spread and a handful of trades, not real demand."
+        )
+        score += 3
+    elif avg_vol < 250_000:
+        warnings.append(
+            f"Light trading (~{avg_vol:,} shares/day). Signals will be noisier than on a "
+            "heavily-traded name."
+        )
+        score += 2
+    elif avg_vol < 1_000_000:
+        score += 1
+
+    if is_derivative:
+        warnings.append(
+            "This looks like a fund or derivative product rather than a company's primary "
+            "listing. Its price reflects the fund's own trading — spreads, tracking error, "
+            "and hedging costs — layered on top of whatever it holds. If you're really "
+            "interested in an underlying stock, analyze that stock's main listing instead: "
+            "it has far more volume and much cleaner signals."
+        )
+        score += 2
+
+    # Stale or gappy pricing
+    if len(hist) >= 10:
+        try:
+            flat_days = int((hist["Close"].tail(20).diff() == 0).sum())
+            if flat_days >= 5:
+                warnings.append(
+                    f"The price didn't move on {flat_days} of the last 20 sessions — a sign "
+                    "of infrequent trading. Indicators built on flat data mean little."
+                )
+                score += 2
+        except Exception:
+            pass
+
+    reliability = "Good" if score <= 1 else "Fair" if score <= 3 else "Poor"
+
+    note = (
+        "RSI, MACD and volume all assume a liquid, continuously-priced market. When that "
+        "assumption doesn't hold, the formulas still produce confident-looking numbers — "
+        "they're just describing the instrument's trading quirks rather than the business. "
+        "A thin listing and its heavily-traded parent can easily disagree; when they do, "
+        "the liquid one is the one telling you something real."
+    )
+
+    return DataQuality(
+        reliability=reliability,
+        avg_daily_volume=avg_vol,
+        instrument_type=quote_type,
+        is_derivative=is_derivative,
+        warnings=warnings,
+        note=note,
+    )
