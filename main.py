@@ -226,6 +226,8 @@ class AnalysisResponse(BaseModel):
     market: str
     price_history: List[float]
     fundamentals: Fundamentals
+    quality: "QualityScore"
+    regime: "MarketRegime"
     earnings: EarningsInfo
     technical_analysis: TechnicalAnalysis
     price_targets: PriceTargets
@@ -296,6 +298,7 @@ class PortfolioResponse(BaseModel):
     total_day_pl: float
     total_day_pl_pct: float
     usd_cad_rate: Optional[float]
+    concentration: Optional["ConcentrationReport"] = None
     summary: str
     generated_at: str
 
@@ -1175,8 +1178,26 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     if not parts:
         parts.append("No strong momentum signals across your holdings right now")
 
+    # Sector lookup for concentration analysis. Best-effort — a failure here
+    # shouldn't take down the whole portfolio view.
+    sectors: Dict[str, str] = {}
+    for r in results:
+        if r.error:
+            continue
+        try:
+            sectors[r.ticker] = (yf.Ticker(r.ticker).info or {}).get("sector") or "Unknown"
+        except Exception:
+            sectors[r.ticker] = "Unknown"
+
+    try:
+        concentration = analyze_concentration(results, sectors)
+    except Exception as e:
+        logger.info(f"Concentration analysis skipped: {e}")
+        concentration = None
+
     return PortfolioResponse(
         holdings=results,
+        concentration=concentration,
         total_cost=round(total_cost, 2),
         total_value=round(total_value, 2),
         total_pl=round(total_pl, 2),
@@ -1311,6 +1332,8 @@ def analyze(ticker: str):
     price_history = [round(float(v), 2) for v in close.tail(30).tolist()]
 
     fundamentals = build_fundamentals(info, current_price)
+    quality = compute_quality_score(info)
+    regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
     earnings = fetch_earnings(stock)
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
@@ -1328,6 +1351,8 @@ def analyze(ticker: str):
         market=detect_market(ticker),
         price_history=price_history,
         fundamentals=fundamentals,
+        quality=quality,
+        regime=regime,
         earnings=earnings,
         technical_analysis=technical,
         price_targets=price_targets,
@@ -1477,6 +1502,13 @@ def digest(request: DigestRequest, force: bool = False):
 BACKTEST_HORIZONS = [5, 10, 20]
 
 
+# Realistic round-trip trading cost, in percent. Covers commission plus the
+# bid-ask spread you actually cross on both entry and exit. Deliberately
+# conservative for a retail account — an "edge" smaller than this is not an
+# edge, it's a transfer to your broker.
+ROUND_TRIP_COST_PCT = 0.30
+
+
 class HorizonResult(BaseModel):
     days: int
     win_rate: Optional[float]
@@ -1484,6 +1516,7 @@ class HorizonResult(BaseModel):
     baseline_win_rate: Optional[float]
     baseline_avg_return: Optional[float]
     edge: Optional[float]
+    net_edge: Optional[float]
 
 
 class SignalBacktest(BaseModel):
@@ -1581,7 +1614,8 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
                 horizons.append(
                     HorizonResult(
                         days=h, win_rate=None, avg_return=None,
-                        baseline_win_rate=None, baseline_avg_return=None, edge=None,
+                        baseline_win_rate=None, baseline_avg_return=None,
+                        edge=None, net_edge=None,
                     )
                 )
                 continue
@@ -1609,6 +1643,7 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
                     baseline_win_rate=round(baseline_win_rate, 1),
                     baseline_avg_return=round(baseline_avg, 2),
                     edge=round(edge, 2),
+                    net_edge=round(edge - ROUND_TRIP_COST_PCT, 2),
                 )
             )
         return SignalBacktest(
@@ -1639,13 +1674,17 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
         )
     elif buy_edge is None:
         parts.append("Not enough forward data to judge BUY signals.")
-    elif buy_edge > 1.0:
+    elif buy_edge > ROUND_TRIP_COST_PCT + 0.5:
         parts.append(
-            f"BUY signals beat the baseline by {buy_edge:.2f}% over 10 days across {buy.event_count} events — a real edge in this sample."
+            f"BUY signals beat the baseline by {buy_edge:.2f}% over 10 days across "
+            f"{buy.event_count} events — about {buy_edge - ROUND_TRIP_COST_PCT:.2f}% after "
+            "realistic trading costs. A real edge in this sample."
         )
     elif buy_edge > 0:
         parts.append(
-            f"BUY signals edged the baseline by only {buy_edge:.2f}% over 10 days — too thin to rely on, and easily erased by fees or slippage."
+            f"BUY signals edged the baseline by {buy_edge:.2f}% over 10 days, but roughly "
+            f"{ROUND_TRIP_COST_PCT:.2f}% goes to commission and spread — leaving about "
+            f"{buy_edge - ROUND_TRIP_COST_PCT:+.2f}% net. Not worth trading on."
         )
     else:
         parts.append(
@@ -1739,6 +1778,27 @@ class VariantComparison(BaseModel):
     generated_at: str
 
 
+_BENCHMARK_CACHE: Dict[str, Tuple[float, Any]] = {}
+_BENCHMARK_TTL_SECONDS = 3600
+
+
+def _get_benchmark(symbol: str, period: str) -> Optional[pd.Series]:
+    """Index data for relative strength. Cached — a basket run would otherwise
+    refetch the same index once per ticker."""
+    key = f"{symbol}:{period}"
+    cached = _BENCHMARK_CACHE.get(key)
+    if cached and time.time() - cached[0] < _BENCHMARK_TTL_SECONDS:
+        return cached[1]
+    try:
+        bh = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+        series = bh["Close"].dropna() if bh is not None and not bh.empty else None
+    except Exception as e:
+        logger.info(f"Benchmark fetch skipped: {e}")
+        series = None
+    _BENCHMARK_CACHE[key] = (time.time(), series)
+    return series
+
+
 def _weekly_trend_flag(close: pd.Series) -> pd.Series:
     """
     Is the weekly trend up? Forward-filled to daily.
@@ -1800,13 +1860,7 @@ def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
     # Canadian). One extra request per comparison — acceptable here since this
     # is an on-demand analysis, not something the screener runs in bulk.
     benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN")) else "^GSPC"
-    benchmark = None
-    try:
-        bh = yf.Ticker(benchmark_symbol).history(period=period, interval="1d", auto_adjust=True)
-        if bh is not None and not bh.empty:
-            benchmark = bh["Close"].dropna()
-    except Exception as e:
-        logger.info(f"Benchmark fetch skipped: {e}")
+    benchmark = _get_benchmark(benchmark_symbol, period)
     df["rel_strength"] = _relative_strength(close, benchmark)
 
     # Base signal, same rule the live app uses.
@@ -2115,3 +2169,603 @@ def describe_divergence(kind: Optional[str], bars_ago: Optional[int]) -> str:
         "lower high — the rally is running on weaker momentum. Often precedes a pullback, "
         "though strong trends can push through divergences for weeks."
     )
+
+
+# ===========================================================================
+# CROSS-TICKER AGGREGATE COMPARISON
+#
+# The single-ticker comparison can't settle anything on its own: with eight
+# variants, something looks best by luck most of the time. The only way to
+# tell a real filter from a lucky one is whether it wins CONSISTENTLY across
+# unrelated stocks.
+#
+# So this runs the variants over a basket and applies a binomial test: if a
+# filter beat the baseline on k of n tickers, how likely is that under the
+# null hypothesis that it's a coin flip? A filter winning 9 of 10 is hard to
+# explain by chance (p ≈ 0.011); winning 6 of 10 is not (p ≈ 0.377).
+#
+# The p-value is then Bonferroni-corrected for the number of variants tested,
+# because testing eight hypotheses and reporting the best one without
+# correction is precisely how false discoveries get published.
+# ===========================================================================
+
+import math
+
+DEFAULT_BASKET = [
+    "AAPL", "MSFT", "JNJ", "XOM", "JPM", "WMT",
+    "NVDA", "PFE", "RY.TO", "ENB.TO", "SHOP.TO", "BCE.TO",
+]
+
+
+class AggregateVariantResult(BaseModel):
+    name: str
+    description: str
+    tickers_tested: int
+    tickers_beating_baseline: int
+    mean_edge: Optional[float]
+    median_edge: Optional[float]
+    mean_signals_per_ticker: Optional[float]
+    p_value: Optional[float]
+    significant: bool
+    verdict: str
+
+
+class AggregateComparison(BaseModel):
+    tickers_requested: List[str]
+    tickers_analyzed: List[str]
+    tickers_failed: List[str]
+    period: str
+    results: List[AggregateVariantResult]
+    conclusion: str
+    method_note: str
+    generated_at: str
+
+
+def _binomial_p_at_least(k: int, n: int, p: float = 0.5) -> float:
+    """P(X >= k) for X ~ Binomial(n, p). One-sided."""
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(k, n + 1))
+
+
+def aggregate_variants(tickers: List[str], period: str = "5y") -> AggregateComparison:
+    tickers = [t.strip().upper() for t in tickers if t and t.strip()][:15]
+    if not tickers:
+        tickers = DEFAULT_BASKET
+
+    # variant name -> list of (edge, signal_count) per ticker
+    per_variant: Dict[str, List[Tuple[float, int]]] = {name: [] for name, _ in VARIANT_DEFS}
+    baseline_edges: Dict[str, float] = {}
+    analyzed, failed = [], []
+
+    for t in tickers:
+        try:
+            df = _prepare_indicator_frame(t, period)
+        except Exception as e:
+            logger.info(f"Aggregate: skipping {t} ({e})")
+            failed.append(t)
+            continue
+
+        ticker_results = {}
+        for name, _desc in VARIANT_DEFS:
+            try:
+                sig = _apply_variant(df, name)
+                n_events, edge, _win = _edge_for(df, sig, "BUY", 10)
+                ticker_results[name] = (edge, n_events)
+            except Exception:
+                ticker_results[name] = (None, 0)
+
+        base_edge = ticker_results.get("baseline", (None, 0))[0]
+        if base_edge is None:
+            failed.append(t)
+            continue
+
+        analyzed.append(t)
+        baseline_edges[t] = base_edge
+        for name, (edge, n) in ticker_results.items():
+            if edge is not None:
+                per_variant[name].append((edge, n, base_edge))
+
+    results: List[AggregateVariantResult] = []
+    n_variants = max(len(VARIANT_DEFS) - 1, 1)  # baseline isn't a hypothesis
+
+    for name, description in VARIANT_DEFS:
+        rows = per_variant.get(name, [])
+        if not rows:
+            results.append(
+                AggregateVariantResult(
+                    name=name, description=description, tickers_tested=0,
+                    tickers_beating_baseline=0, mean_edge=None, median_edge=None,
+                    mean_signals_per_ticker=None, p_value=None, significant=False,
+                    verdict="No usable data.",
+                )
+            )
+            continue
+
+        edges = [r[0] for r in rows]
+        counts = [r[1] for r in rows]
+        wins = sum(1 for edge, _n, base in rows if edge > base)
+        n = len(rows)
+        mean_edge = float(np.mean(edges))
+        median_edge = float(np.median(edges))
+        mean_signals = float(np.mean(counts))
+
+        if name == "baseline":
+            p_value = None
+            significant = False
+            verdict = "Reference point — the rules the app uses today."
+        else:
+            raw_p = _binomial_p_at_least(wins, n)
+            # Bonferroni: testing several filters inflates false positives.
+            p_value = min(1.0, raw_p * n_variants)
+            significant = p_value < 0.05 and mean_edge > 0
+
+            if mean_signals < 10:
+                verdict = (
+                    f"Averages only {mean_signals:.0f} signals per ticker — too few to judge, "
+                    "regardless of how the edge looks."
+                )
+            elif significant:
+                verdict = (
+                    f"Beat baseline on {wins}/{n} tickers with a mean edge of {mean_edge:+.2f}%. "
+                    f"Survives correction for multiple testing (p={p_value:.3f}) — this looks real."
+                )
+            elif wins > n / 2 and mean_edge > 0:
+                verdict = (
+                    f"Beat baseline on {wins}/{n} tickers ({mean_edge:+.2f}% mean edge), but that's "
+                    f"within what chance produces when testing this many filters (p={p_value:.2f}). "
+                    "Not enough to act on."
+                )
+            else:
+                verdict = (
+                    f"Beat baseline on only {wins}/{n} tickers, mean edge {mean_edge:+.2f}%. "
+                    "No evidence this filter helps."
+                )
+
+        results.append(
+            AggregateVariantResult(
+                name=name, description=description, tickers_tested=n,
+                tickers_beating_baseline=wins, mean_edge=round(mean_edge, 2),
+                median_edge=round(median_edge, 2),
+                mean_signals_per_ticker=round(mean_signals, 1),
+                p_value=round(p_value, 4) if p_value is not None else None,
+                significant=significant, verdict=verdict,
+            )
+        )
+
+    winners = [r for r in results if r.significant]
+    if not analyzed:
+        conclusion = "No tickers could be analyzed. Try again, or use a different basket."
+    elif not winners:
+        conclusion = (
+            f"Across {len(analyzed)} tickers, no filter improved on the current rules by "
+            "enough to rule out chance. That is a legitimate and common result — it means "
+            "leave the signal logic alone rather than adopting something that only looked "
+            "good on a handful of stocks."
+        )
+    else:
+        best = max(winners, key=lambda r: r.mean_edge)
+        conclusion = (
+            f"'{best.description}' is the one filter that holds up: it beat the current rules "
+            f"on {best.tickers_beating_baseline} of {best.tickers_tested} tickers, mean edge "
+            f"{best.mean_edge:+.2f}%, still significant after correcting for the number of "
+            f"filters tested (p={best.p_value:.3f}). This is the one worth adopting."
+        )
+
+    method_note = (
+        "Method, so you can judge it yourself. Each filter is scored on how many tickers it "
+        "beat the current rules on, then tested against the null hypothesis that it's a coin "
+        "flip (binomial test). The p-value is Bonferroni-corrected for the number of filters "
+        "tried, because testing eight ideas and reporting the best without correction is how "
+        "false discoveries happen. A filter needs corrected p < 0.05 AND a positive mean edge "
+        "AND at least ~10 signals per ticker to be called real. This is still backward-looking "
+        "and uses one holding period with no fees — it narrows what's worth trying, it doesn't "
+        "prove anything will keep working."
+    )
+
+    return AggregateComparison(
+        tickers_requested=tickers,
+        tickers_analyzed=analyzed,
+        tickers_failed=failed,
+        period=period,
+        results=results,
+        conclusion=conclusion,
+        method_note=method_note,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/backtest/aggregate", response_model=AggregateComparison)
+def backtest_aggregate(tickers: str = "", period: str = "5y"):
+    """
+    Run the variant comparison across a basket of tickers and report which
+    filters hold up statistically. This is the endpoint that can actually
+    settle whether a filter is worth adopting.
+
+    tickers: comma-separated. Omit to use a diversified default basket.
+    """
+    if period not in ("2y", "5y", "10y"):
+        period = "5y"
+    ticker_list = [t for t in tickers.split(",") if t.strip()] if tickers else DEFAULT_BASKET
+    return aggregate_variants(ticker_list, period)
+
+
+# ===========================================================================
+# PORTFOLIO CONCENTRATION / CORRELATION
+#
+# Analyzing each holding alone hides the most common real-world mistake:
+# owning RY, TD and BMO isn't three positions, it's one leveraged bet on
+# Canadian banks. Correlation makes that visible.
+# ===========================================================================
+
+class CorrelatedPair(BaseModel):
+    ticker_a: str
+    ticker_b: str
+    correlation: float
+
+
+class ConcentrationReport(BaseModel):
+    highly_correlated_pairs: List[CorrelatedPair]
+    largest_position_pct: Optional[float]
+    top_three_pct: Optional[float]
+    effective_positions: Optional[float]
+    sector_concentration: Dict[str, float]
+    warnings: List[str]
+    note: str
+
+
+def analyze_concentration(
+    holdings: List[HoldingResult], sectors: Dict[str, str]
+) -> ConcentrationReport:
+    valid = [h for h in holdings if not h.error and h.market_value]
+    if len(valid) < 1:
+        return ConcentrationReport(
+            highly_correlated_pairs=[], largest_position_pct=None, top_three_pct=None,
+            effective_positions=None, sector_concentration={}, warnings=[],
+            note="Add holdings to see concentration analysis.",
+        )
+
+    total = sum(h.market_value for h in valid)
+    weights = {h.ticker: h.market_value / total for h in valid} if total else {}
+
+    largest = max(weights.values()) * 100 if weights else None
+    top3 = sum(sorted(weights.values(), reverse=True)[:3]) * 100 if weights else None
+
+    # Effective number of positions (inverse Herfindahl). Ten equal holdings
+    # gives 10; ten holdings where one is 90% gives barely above 1. This is a
+    # far better diversification measure than simply counting positions.
+    hhi = sum(w * w for w in weights.values())
+    effective = round(1 / hhi, 1) if hhi > 0 else None
+
+    sector_conc: Dict[str, float] = {}
+    for h in valid:
+        sec = sectors.get(h.ticker) or "Unknown"
+        sector_conc[sec] = sector_conc.get(sec, 0) + weights.get(h.ticker, 0) * 100
+    sector_conc = {k: round(v, 1) for k, v in sorted(sector_conc.items(), key=lambda kv: -kv[1])}
+
+    # Correlation of daily returns over the past year.
+    pairs: List[CorrelatedPair] = []
+    tickers = [h.ticker for h in valid]
+    if len(tickers) >= 2:
+        try:
+            raw = yf.download(tickers, period="1y", interval="1d", auto_adjust=True,
+                              group_by="ticker", progress=False, threads=True)
+            closes = {}
+            for t in tickers:
+                try:
+                    series = raw[t]["Close"] if len(tickers) > 1 else raw["Close"]
+                    closes[t] = series.dropna()
+                except Exception:
+                    continue
+            if len(closes) >= 2:
+                rets = pd.DataFrame({t: s.pct_change() for t, s in closes.items()}).dropna()
+                if len(rets) > 30:
+                    corr = rets.corr()
+                    seen = set()
+                    for a in corr.columns:
+                        for b in corr.columns:
+                            if a == b or (b, a) in seen:
+                                continue
+                            seen.add((a, b))
+                            c = corr.loc[a, b]
+                            if pd.notna(c) and c >= 0.7:
+                                pairs.append(CorrelatedPair(
+                                    ticker_a=a, ticker_b=b, correlation=round(float(c), 2)
+                                ))
+                    pairs.sort(key=lambda p: -p.correlation)
+                    pairs = pairs[:8]
+        except Exception as e:
+            logger.info(f"Correlation calc skipped: {e}")
+
+    warnings = []
+    if largest and largest > 30:
+        warnings.append(
+            f"Your largest position is {largest:.0f}% of the portfolio. A single bad "
+            "outcome there would dominate your overall result."
+        )
+    if top3 and top3 > 70 and len(valid) > 3:
+        warnings.append(
+            f"Your top three positions are {top3:.0f}% of the portfolio — the rest are "
+            "too small to matter much either way."
+        )
+    if effective and len(valid) >= 4 and effective < len(valid) * 0.5:
+        warnings.append(
+            f"You hold {len(valid)} positions, but weighting makes them behave more like "
+            f"{effective:.0f}. Diversification is thinner than the position count suggests."
+        )
+    for p in pairs[:3]:
+        warnings.append(
+            f"{p.ticker_a} and {p.ticker_b} move together ({p.correlation:.0%} correlated) — "
+            "they'll tend to fall at the same time, so they don't diversify each other."
+        )
+    for sec, pct in list(sector_conc.items())[:1]:
+        if pct > 40 and sec != "Unknown":
+            warnings.append(f"{pct:.0f}% of the portfolio sits in {sec}.")
+
+    note = (
+        "Correlation is measured on the past year of daily moves. Two stocks above 0.7 "
+        "have historically risen and fallen together, so holding both gives less protection "
+        "than it appears. Correlations also tend to rise sharply in a crash — exactly when "
+        "diversification matters most — so treat these as a floor, not a ceiling."
+    )
+
+    return ConcentrationReport(
+        highly_correlated_pairs=pairs,
+        largest_position_pct=round(largest, 1) if largest else None,
+        top_three_pct=round(top3, 1) if top3 else None,
+        effective_positions=effective,
+        sector_concentration=sector_conc,
+        warnings=warnings,
+        note=note,
+    )
+
+
+# ===========================================================================
+# FUNDAMENTAL QUALITY SCORE
+#
+# The app already fetches this data and then ignores it. A BUY on a
+# profitable, low-debt company is a different proposition from the identical
+# chart pattern on one burning cash.
+# ===========================================================================
+
+class QualityScore(BaseModel):
+    score: Optional[int]
+    grade: str
+    factors: List[str]
+    concerns: List[str]
+    note: str
+
+
+def compute_quality_score(info: dict) -> QualityScore:
+    def num(key):
+        v = info.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    score = 0
+    max_score = 0
+    factors, concerns = [], []
+
+    margin = num("profitMargins")
+    if margin is not None:
+        max_score += 2
+        if margin > 0.15:
+            score += 2; factors.append(f"Strong profit margin ({margin*100:.1f}%)")
+        elif margin > 0.05:
+            score += 1; factors.append(f"Modest profit margin ({margin*100:.1f}%)")
+        elif margin > 0:
+            factors.append(f"Thin profit margin ({margin*100:.1f}%)")
+        else:
+            concerns.append(f"Unprofitable ({margin*100:.1f}% margin)")
+
+    d2e = num("debtToEquity")
+    if d2e is not None:
+        max_score += 2
+        if d2e < 50:
+            score += 2; factors.append(f"Low debt (debt/equity {d2e:.0f}%)")
+        elif d2e < 150:
+            score += 1; factors.append(f"Moderate debt (debt/equity {d2e:.0f}%)")
+        else:
+            concerns.append(f"High debt load (debt/equity {d2e:.0f}%)")
+
+    roe = num("returnOnEquity")
+    if roe is not None:
+        max_score += 2
+        if roe > 0.15:
+            score += 2; factors.append(f"Strong return on equity ({roe*100:.1f}%)")
+        elif roe > 0.05:
+            score += 1; factors.append(f"Adequate return on equity ({roe*100:.1f}%)")
+        else:
+            concerns.append(f"Weak return on equity ({roe*100:.1f}%)")
+
+    growth = num("revenueGrowth")
+    if growth is not None:
+        max_score += 2
+        if growth > 0.10:
+            score += 2; factors.append(f"Revenue growing {growth*100:.1f}%")
+        elif growth > 0:
+            score += 1; factors.append(f"Revenue growing slowly ({growth*100:.1f}%)")
+        else:
+            concerns.append(f"Revenue shrinking ({growth*100:.1f}%)")
+
+    current = num("currentRatio")
+    if current is not None:
+        max_score += 1
+        if current > 1.5:
+            score += 1; factors.append(f"Comfortable liquidity (current ratio {current:.1f})")
+        elif current < 1:
+            concerns.append(f"Tight liquidity (current ratio {current:.1f})")
+
+    if max_score == 0:
+        return QualityScore(
+            score=None, grade="Unknown", factors=[], concerns=[],
+            note="Fundamental data isn't available for this ticker — common for ETFs, funds, and smaller listings.",
+        )
+
+    pct = int(round(score / max_score * 100))
+    grade = "Strong" if pct >= 75 else "Decent" if pct >= 50 else "Weak" if pct >= 25 else "Poor"
+
+    note = (
+        "This grades the BUSINESS, not the stock price — a strong company can still be a bad "
+        "buy if it's overpriced, and a weak one can rally hard. It's a sanity check against "
+        "the chart: a BUY signal on a 'Poor' business deserves more scepticism than the same "
+        "signal on a 'Strong' one. Based on the most recent reported figures, which lag."
+    )
+
+    return QualityScore(score=pct, grade=grade, factors=factors, concerns=concerns, note=note)
+
+
+# ===========================================================================
+# MARKET REGIME
+#
+# RSI and MACD behave very differently in trending versus choppy markets.
+# Knowing which one you're in is more useful than another indicator.
+# ===========================================================================
+
+class MarketRegime(BaseModel):
+    regime: str
+    index_used: str
+    index_vs_200ma: Optional[float]
+    volatility_percentile: Optional[float]
+    note: str
+
+
+_REGIME_CACHE: Dict[str, Tuple[float, Any]] = {}
+
+
+def get_market_regime(canadian: bool = False) -> MarketRegime:
+    symbol = "^GSPTSE" if canadian else "^GSPC"
+    cached = _REGIME_CACHE.get(symbol)
+    if cached and time.time() - cached[0] < 3600:
+        return MarketRegime(**cached[1])
+
+    fallback = MarketRegime(
+        regime="Unknown", index_used=symbol, index_vs_200ma=None,
+        volatility_percentile=None,
+        note="Couldn't determine the current market regime.",
+    )
+    try:
+        hist = yf.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
+        if hist is None or hist.empty or len(hist) < 200:
+            return fallback
+        close = hist["Close"].dropna()
+        sma200 = close.rolling(200).mean()
+        vs_200 = float((close.iloc[-1] / sma200.iloc[-1] - 1) * 100)
+
+        rets = close.pct_change().dropna()
+        vol20 = rets.rolling(20).std()
+        current_vol = float(vol20.iloc[-1])
+        vol_pct = float((vol20.dropna() < current_vol).mean() * 100)
+
+        if vs_200 > 3 and vol_pct < 70:
+            regime = "Trending up, calm"
+            note = ("The index is comfortably above its 200-day average with unremarkable "
+                    "volatility. Momentum signals tend to work better here, and BUY signals "
+                    "have the broader market behind them.")
+        elif vs_200 > 3:
+            regime = "Trending up, volatile"
+            note = ("The index is above its long-term average but moving sharply. Signals "
+                    "fire more often and reverse more often — position sizes should reflect that.")
+        elif vs_200 < -3 and vol_pct > 70:
+            regime = "Falling, volatile"
+            note = ("The index is below its 200-day average with elevated volatility — the "
+                    "hardest conditions for momentum signals. Oversold readings can stay "
+                    "oversold for a long time. Treat BUY signals with real caution.")
+        elif vs_200 < -3:
+            regime = "Falling, calm"
+            note = ("The index is below its long-term average in an orderly decline. "
+                    "Counter-trend BUY signals have a poor historical record in this setup.")
+        else:
+            regime = "Choppy / rangebound"
+            note = ("The index is near its 200-day average with no clear direction. Choppy "
+                    "markets produce the most false signals — trend-following logic whipsaws.")
+
+        result = MarketRegime(
+            regime=regime, index_used="S&P/TSX" if canadian else "S&P 500",
+            index_vs_200ma=round(vs_200, 2),
+            volatility_percentile=round(vol_pct, 0),
+            note=note,
+        )
+        _REGIME_CACHE[symbol] = (time.time(), result.model_dump())
+        return result
+    except Exception as e:
+        logger.info(f"Regime detection skipped: {e}")
+        return fallback
+
+
+@app.get("/api/regime", response_model=MarketRegime)
+def market_regime(canadian: bool = False):
+    """Current market conditions — context for how much to trust any signal."""
+    return get_market_regime(canadian)
+
+
+# Forward references (QualityScore, MarketRegime, ConcentrationReport are
+# defined after the response models that reference them).
+AnalysisResponse.model_rebuild()
+PortfolioResponse.model_rebuild()
+
+
+# ===========================================================================
+# QUOTES — lightweight batch price lookup, used by the decision journal to
+# measure how logged decisions actually turned out.
+# ===========================================================================
+
+class Quote(BaseModel):
+    ticker: str
+    price: Optional[float]
+    currency: str
+    error: Optional[str] = None
+
+
+class QuotesResponse(BaseModel):
+    quotes: List[Quote]
+    generated_at: str
+
+
+_QUOTES_CACHE: Dict[str, Tuple[float, float]] = {}
+_QUOTES_TTL_SECONDS = 300
+
+
+@app.get("/api/quotes", response_model=QuotesResponse)
+def quotes(tickers: str = ""):
+    symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()][:40]
+    if not symbols:
+        return QuotesResponse(quotes=[], generated_at=datetime.now(timezone.utc).isoformat())
+
+    results: List[Quote] = []
+    fresh_needed = []
+    now = time.time()
+
+    for s in symbols:
+        cached = _QUOTES_CACHE.get(s)
+        if cached and now - cached[0] < _QUOTES_TTL_SECONDS:
+            results.append(Quote(
+                ticker=s, price=cached[1],
+                currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+            ))
+        else:
+            fresh_needed.append(s)
+
+    if fresh_needed:
+        try:
+            raw = yf.download(fresh_needed, period="5d", interval="1d", auto_adjust=True,
+                              group_by="ticker", progress=False, threads=True)
+            for s in fresh_needed:
+                try:
+                    series = raw[s]["Close"] if len(fresh_needed) > 1 else raw["Close"]
+                    price = round(float(series.dropna().iloc[-1]), 2)
+                    _QUOTES_CACHE[s] = (now, price)
+                    results.append(Quote(
+                        ticker=s, price=price,
+                        currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+                    ))
+                except Exception:
+                    results.append(Quote(ticker=s, price=None, currency="USD", error="No data"))
+        except Exception as e:
+            logger.warning(f"Quotes fetch failed: {e}")
+            for s in fresh_needed:
+                results.append(Quote(ticker=s, price=None, currency="USD", error="Fetch failed"))
+
+    return QuotesResponse(quotes=results, generated_at=datetime.now(timezone.utc).isoformat())
