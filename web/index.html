@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0B0D0C">
+<title>Market Analyzer</title>
+<link rel="icon" href="/static/favicon.png">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+/* ---------------------------------------------------------------------------
+   Precision-instrument theme, matching the mobile app.
+   Green and red are reserved strictly for money moving — never decoration.
+   All measured values are monospace so figures align in columns.
+--------------------------------------------------------------------------- */
+:root{
+  --bg:#0B0D0C; --card:#131715; --cardAlt:#181E1B; --border:#242B27; --borderLit:#333D37;
+  --text:#E9E7E2; --muted:#8B948D; --faint:#5A635C;
+  --accent:#CEA04E; --accentDim:#8E6E36;
+  --green:#4FA882; --red:#C4574C; --amber:#D9A441;
+  --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}
+
+/* header */
+header{position:sticky;top:0;z-index:50;background:rgba(11,13,12,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.hdr{max-width:1180px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px}
+.logo{width:42px;height:42px;border-radius:10px;background:var(--cardAlt);border:1px solid var(--borderLit);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+h1{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.tag{font-size:11.5px;color:var(--muted);margin-top:2px}
+nav{margin-left:auto;display:flex;gap:4px}
+nav button{background:none;border:none;color:var(--muted);font:600 12.5px/1 inherit;letter-spacing:.6px;text-transform:uppercase;padding:9px 13px;border-radius:7px;cursor:pointer;transition:.15s}
+nav button:hover{color:var(--text);background:var(--card)}
+nav button.on{color:var(--accent);background:rgba(206,160,78,.1)}
+
+/* search */
+.searchbar{display:flex;gap:9px;margin:22px 0 18px;position:relative}
+input,select,textarea{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px 15px;color:var(--text);font:15px inherit;width:100%;outline:none}
+input:focus,textarea:focus{border-color:var(--accentDim)}
+.btn{background:var(--accent);color:var(--bg);border:none;border-radius:9px;padding:12px 22px;font:700 14px/1 inherit;cursor:pointer;white-space:nowrap;transition:.15s}
+.btn:hover{filter:brightness(1.08)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.ghost{background:none;border:1px solid rgba(206,160,78,.4);color:var(--accent)}
+.btn.sm{padding:8px 14px;font-size:12.5px}
+.sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--borderLit);border-radius:11px;overflow:hidden;z-index:40;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.sugg div{padding:11px 15px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.sugg div:first-child{border-top:none}
+.sugg div:hover{background:var(--cardAlt)}
+.sugg b{font-size:14px}
+.sugg span{color:var(--muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--border);padding:3px 7px;border-radius:4px}
+
+/* cards + grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;align-items:start}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:17px;margin-bottom:14px}
+.card.alt{background:var(--cardAlt);border-color:var(--borderLit);border-radius:14px}
+.card h2{font-size:15.5px;font-weight:700;letter-spacing:-.2px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.lbl{font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;font-weight:700;color:var(--faint)}
+.row{display:flex;justify-content:space-between;padding:6px 0;gap:12px;font-size:12.5px}
+.row span:first-child{color:var(--muted)}
+.row span:last-child{font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.rule{height:1px;background:var(--border);margin:12px 0}
+.note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px;font-style:italic}
+.plain{font-size:13.5px;line-height:1.6}
+.dim{color:var(--muted)}
+.mut{color:var(--muted);font-size:12.5px;line-height:1.55}
+
+/* signal readout — the signature element */
+.readout{background:var(--cardAlt);border:1px solid;border-radius:14px;padding:18px;margin-bottom:14px}
+.readout .top{display:flex;justify-content:space-between;align-items:flex-start}
+.verdict{font:700 42px/1 var(--mono);letter-spacing:2px;margin-top:6px}
+.meter{display:flex;align-items:flex-end;height:14px;gap:3px;justify-content:flex-end}
+.seg{width:4px;border-radius:1px;background:var(--border)}
+.grad{margin:14px 0 12px}
+.gradline{height:1px;background:var(--borderLit)}
+.gradticks{display:flex;justify-content:space-between}
+.gradticks i{width:1px;height:3px;background:var(--border)}
+.gradticks i:nth-child(4n+1){height:6px;background:var(--borderLit)}
+.stats3{display:flex;gap:16px}
+.stats3 div{flex:1}
+.stats3 b{display:block;font:600 15px var(--mono);margin-top:4px}
+
+/* banners */
+.banner{background:var(--card);border-left:3px solid;border-radius:10px;padding:13px;margin-bottom:14px}
+.banner p{font-size:12px;line-height:1.55;margin-top:6px}
+.pill{border:1px solid;border-radius:6px;padding:5px 11px;font:700 12px/1 inherit;letter-spacing:1px}
+.mini{border:1px solid;border-radius:4px;padding:3px 7px;font:700 9px/1 inherit;letter-spacing:.9px}
+
+/* chart */
+.ranges{display:flex;gap:6px;margin:16px 0 10px;flex-wrap:wrap}
+.ranges button{background:none;border:none;color:var(--muted);font:700 11.5px/1 inherit;padding:6px 11px;border-radius:7px;cursor:pointer}
+.ranges button.on{background:rgba(206,160,78,.14);color:var(--accent)}
+svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
+
+/* lists */
+.srow{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--border);cursor:pointer}
+.srow:hover b{color:var(--accent)}
+.srow b{font-size:14px}
+.srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
+.prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
+.dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
+.hl{border-top:1px solid var(--border);padding:11px 0}
+.hl .t{font-size:13px;line-height:1.45;margin-top:5px}
+.hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.45}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.chip{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:7px 14px;font:600 12.5px/1 inherit;color:var(--muted);cursor:pointer;font-family:var(--mono)}
+.chip.on{border-color:rgba(206,160,78,.5);background:rgba(206,160,78,.09);color:var(--accent)}
+.link{color:var(--accent);font:700 12px/1 inherit;cursor:pointer;background:none;border:none;padding:0}
+.center{text-align:center;padding:56px 20px;color:var(--muted)}
+.center h3{color:var(--text);font-size:16px;margin-bottom:7px}
+.err{background:rgba(196,87,76,.1);border:1px solid rgba(196,87,76,.35);border-radius:11px;padding:14px;margin-bottom:14px}
+.err b{color:var(--red);display:block;margin-bottom:4px;font-size:14px}
+.exp{margin-top:12px}
+.expbody{background:rgba(206,160,78,.06);border-left:2px solid rgba(206,160,78,.4);border-radius:8px;padding:12px;margin-top:9px;font-size:12.5px;line-height:1.65}
+.spin{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+.big{font:700 36px/1 var(--mono);letter-spacing:-.5px}
+.chg{font:700 13.5px var(--mono);margin-top:6px}
+.split{display:flex;gap:16px;margin:10px 0}
+.split div{flex:1}
+.split b{display:block;font:700 19px var(--mono);margin-top:4px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal .box{background:var(--bg);border:1px solid var(--borderLit);border-radius:16px;padding:22px;max-width:520px;width:100%;max-height:88vh;overflow:auto}
+.opt{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px;margin-top:8px;cursor:pointer}
+.opt.on{border-color:rgba(206,160,78,.6);background:rgba(206,160,78,.08)}
+.opt b{display:block;font-size:14px}
+.opt span{color:var(--muted);font-size:11.5px}
+@media(max-width:720px){.hdr{flex-wrap:wrap}nav{width:100%;margin:8px 0 0;overflow-x:auto}.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef} = React;
+const API = "";  // same origin as the backend serving this page
+
+// Storage with in-memory fallback so the page still works if the browser
+// blocks localStorage (private mode, embedded contexts, etc).
+const mem = {};
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : (mem[k] ?? d); } catch { return mem[k] ?? d; } },
+  set(k, v) { mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
+const SENT = { positive:"var(--green)", negative:"var(--red)", neutral:"var(--muted)" };
+const fmt = n => n == null ? "—" : Number(n).toLocaleString();
+const pct = n => n == null ? "—" : `${n >= 0 ? "+" : ""}${n}%`;
+
+async function api(path, opts) {
+  const r = await fetch(API + path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || `Request failed (${r.status})`);
+  return j;
+}
+
+function Logo() {
+  const h = [9,15,12,22];
+  return <svg width="30" height="26" viewBox="0 0 34 30">
+    {h.map((v,i)=><rect key={i} x={2.4+i*7.8} y={25-v} width="5.2" height={v} rx="1.1"
+      fill={i===3?"var(--accent)":"var(--accentDim)"}/>)}
+    <rect x="0" y="25" width="34" height="1.8" rx=".9" fill="var(--text)"/>
+    {[0,1,2,3,4,5,6].map(i=><rect key={i} x={i*5.4+.4} y="27.4" width="1.1" height="3" rx=".5" fill="var(--faint)"/>)}
+  </svg>;
+}
+
+const Grad = ({t=13}) => <div className="grad">
+  <div className="gradline"/><div className="gradticks">{Array.from({length:t}).map((_,i)=><i key={i}/>)}</div>
+</div>;
+
+function Exp({text}) {
+  const [o,setO] = useState(false);
+  if (!text) return null;
+  return <div className="exp">
+    <button className="link" onClick={()=>setO(!o)}>{o?"▲  Hide explanation":"ⓘ  Why this matters"}</button>
+    {o && <div className="expbody">{text}</div>}
+  </div>;
+}
+const Row = ({l,v,c}) => <div className="row"><span>{l}</span><span style={c?{color:c}:{}}>{v ?? "—"}</span></div>;
+const Spin = ({t}) => <div className="center"><div className="spin"/>{t && <p style={{marginTop:14,fontSize:13}}>{t}</p>}</div>;
+
+/* ===== Signal readout — the signature element ===== */
+function Readout({t}) {
+  const c = SIG[t.signal] || "var(--muted)";
+  const filled = {High:3,Moderate:2,Low:1,Neutral:0}[t.conviction] ?? 0;
+  return <div className="readout" style={{borderColor:c+"44"}}>
+    <div className="top">
+      <div className="lbl" style={{marginTop:3}}>Signal</div>
+      <div style={{textAlign:"right"}}>
+        <div className="meter">{[0,1,2].map(i=><div key={i} className="seg"
+          style={{height:6+i*4,background:i<filled?c:"var(--border)"}}/>)}</div>
+        <div className="lbl" style={{marginTop:5,color:"var(--muted)"}}>{t.conviction}</div>
+      </div>
+    </div>
+    <div className="verdict" style={{color:c}}>{t.signal}</div>
+    <Grad/>
+    <div className="stats3">
+      <div><div className="lbl">RSI</div><b>{t.rsi ?? "—"}</b></div>
+      <div><div className="lbl">MACD</div><b>{t.macd_histogram ?? "—"}</b></div>
+      <div><div className="lbl">VOL</div><b>{t.volume_ratio != null ? t.volume_ratio+"×" : "—"}</b></div>
+    </div>
+  </div>;
+}
+
+/* ===== Price chart with range selection and hover scrubbing ===== */
+function Chart({ticker, currency}) {
+  const [range,setRange] = useState("1M");
+  const [pts,setPts] = useState(null);
+  const [busy,setBusy] = useState(true);
+  const [err,setErr] = useState(false);
+  const [hover,setHover] = useState(null);
+
+  useEffect(()=>{
+    let dead = false;
+    setBusy(true); setErr(false); setHover(null);
+    api(`/api/history/${encodeURIComponent(ticker)}?range=${range}`)
+      .then(j=>{ if(!dead) setPts(j.points?.length>1 ? j.points : null); })
+      .catch(()=>{ if(!dead){ setErr(true); setPts(null); } })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[ticker,range]);
+
+  const closes = pts?.map(p=>p.close);
+  const W = 600, H = 150;
+  let path = "", min = 0, max = 0, chg = null, chgPct = null;
+  if (closes?.length > 1) {
+    min = Math.min(...closes); max = Math.max(...closes);
+    const sp = (max-min) || 1;
+    path = closes.map((v,i)=>`${(i/(closes.length-1))*W},${H-((v-min)/sp)*H}`).join(" ");
+    chg = closes[closes.length-1]-closes[0];
+    chgPct = closes[0] ? (chg/closes[0])*100 : null;
+  }
+  const up = chg == null || chg >= 0;
+  const line = up ? "var(--green)" : "var(--red)";
+
+  const move = e => {
+    if (!closes) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.round(((e.clientX-r.left)/r.width)*(closes.length-1));
+    setHover(Math.max(0,Math.min(closes.length-1,i)));
+  };
+
+  return <div>
+    <div className="ranges">
+      {["1D","1W","1M","3M","6M","1Y","5Y"].map(r=>
+        <button key={r} className={range===r?"on":""} onClick={()=>setRange(r)}>{r}</button>)}
+    </div>
+    {chg != null && <div className="chg" style={{color:line,marginBottom:8}}>
+      {up?"▲":"▼"} {Math.abs(chg).toFixed(2)} {currency} ({Math.abs(chgPct).toFixed(2)}%) over {range}
+    </div>}
+    {busy && <div style={{height:H,display:"flex",alignItems:"center",justifyContent:"center"}}><div className="spin"/></div>}
+    {!busy && err && <p className="mut">Couldn't load chart data for this range.</p>}
+    {!busy && closes && <>
+      <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+           onMouseMove={move} onMouseLeave={()=>setHover(null)}>
+        <polyline points={path} fill="none" stroke={line} strokeWidth="2" vectorEffect="non-scaling-stroke"/>
+        {hover != null && <>
+          <line x1={(hover/(closes.length-1))*W} y1="0" x2={(hover/(closes.length-1))*W} y2={H}
+                stroke="var(--faint)" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
+          <circle cx={(hover/(closes.length-1))*W} cy={H-((closes[hover]-min)/((max-min)||1))*H} r="4" fill={line}/>
+        </>}
+      </svg>
+      <div className="row" style={{fontSize:10.5,color:"var(--faint)"}}>
+        {hover != null
+          ? <><span>{pts[hover].date}</span><span>{pts[hover].close} {currency}</span></>
+          : <><span>Low {min.toFixed(2)}</span><span>High {max.toFixed(2)}</span></>}
+      </div>
+    </>}
+  </div>;
+}
+
+/* ===== Backtest, variant comparison, cross-stock aggregate ===== */
+function Backtest({ticker}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [period,setPeriod] = useState("2y"), [nums,setNums] = useState(false);
+  const [va,setVa] = useState(null), [vBusy,setVBusy] = useState(false);
+  const [ag,setAg] = useState(null), [aBusy,setABusy] = useState(false);
+
+  useEffect(()=>{ setD(null); setErr(null); setVa(null); setAg(null); },[ticker]);
+
+  const run = async p => {
+    const t = p || period; setPeriod(t); setBusy(true); setErr(null);
+    try { setD(await api(`/api/backtest/${encodeURIComponent(ticker)}?period=${t}`)); }
+    catch(e){ setErr(e.message); } finally { setBusy(false); }
+  };
+  const runVa = async () => { setVBusy(true);
+    try { setVa(await api(`/api/backtest/${encodeURIComponent(ticker)}/variants?period=5y`)); }
+    catch(e){ setVa({error:e.message}); } finally { setVBusy(false); } };
+  const runAg = async () => { setABusy(true);
+    try { setAg(await api(`/api/backtest/aggregate?period=5y`)); }
+    catch(e){ setAg({error:e.message}); } finally { setABusy(false); } };
+
+  const block = (bt,label) => {
+    const ten = bt.horizons?.find(h=>h.days===10);
+    const thin = bt.event_count < 10;
+    const good = ten?.net_edge > .5, bad = ten?.edge <= 0;
+    const c = thin?"var(--amber)":good?"var(--green)":bad?"var(--red)":"var(--muted)";
+    return <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid var(--border)"}}>
+      <div className="lbl" style={{marginBottom:7}}>{label}</div>
+      <p className="plain">{bt.plain_summary || `The app gave this signal ${bt.event_count} times.`}</p>
+      {bt.plain_result && <p className="plain" style={{color:c,marginTop:9,fontWeight:600}}>{bt.plain_result}</p>}
+    </div>;
+  };
+
+  return <div className="card">
+    <h2>Signal Backtest</h2>
+    {!d && !busy && !err && <>
+      <p className="mut">Test how this app's own BUY/SELL calls have actually performed on {ticker} —
+        measured against simply picking a random day, which is the only fair comparison.</p>
+      <button className="btn" style={{marginTop:14,width:"100%"}} onClick={()=>run("2y")}>Run backtest</button>
+    </>}
+    {busy && <Spin t="Testing signals against history…"/>}
+    {err && <p className="mut">{err}</p>}
+    {d && !busy && <>
+      <div className="ranges">{["1y","2y","5y"].map(p=>
+        <button key={p} className={period===p?"on":""} onClick={()=>run(p)}>{p.toUpperCase()}</button>)}</div>
+      {block(d.buy,"When the app said BUY")}
+      {block(d.sell,"When the app said SELL")}
+      <div style={{marginTop:16,paddingTop:14,borderTop:"1px solid var(--border)"}}>
+        <p className="mut">Over this whole period, simply buying and holding {ticker} returned{" "}
+          <b style={{color:d.buy_and_hold_return>=0?"var(--green)":"var(--red)"}}>{pct(d.buy_and_hold_return)}</b>.
+          That's the bar any strategy has to clear to be worth the effort.</p>
+      </div>
+      <button className="link" style={{marginTop:14}} onClick={()=>setNums(!nums)}>
+        {nums?"Hide the numbers":"Show me the numbers"}</button>
+      {nums && <div style={{marginTop:10}}>
+        {[["BUY",d.buy],["SELL",d.sell]].map(([n,bt])=><div key={n} style={{marginTop:10}}>
+          <div className="lbl">{n} signals</div>
+          {bt.horizons.map(h=><div className="row" key={h.days}>
+            <span className="num">{h.days}d</span>
+            <span style={{flex:1,textAlign:"left",color:"var(--text)"}}>
+              {h.win_rate==null?"no data":`${h.win_rate}% vs ${h.baseline_win_rate}% random`}</span>
+            <span style={{color:h.net_edge==null?"var(--faint)":h.net_edge>.5?"var(--green)":h.net_edge>-.5?"var(--amber)":"var(--red)"}}>
+              {h.net_edge==null?"—":pct(h.net_edge)}</span>
+          </div>)}
+        </div>)}
+        <p className="note">Left is how often the signal was right, next to how often a random day would
+          have been. The right-hand number is the difference after subtracting what it costs to buy and sell.</p>
+      </div>}
+      <Exp text={d.caveats}/>
+
+      <div style={{marginTop:18,paddingTop:16,borderTop:"1px solid var(--border)"}}>
+        {!va && !vBusy && <>
+          <p className="mut">Want to know whether filtering the signals would improve them? This tests
+            eight rule-sets head-to-head on real history.</p>
+          <button className="btn ghost" style={{marginTop:12,width:"100%"}} onClick={runVa}>Compare rule-sets</button>
+        </>}
+        {vBusy && <Spin t="Testing eight rule-sets…"/>}
+        {va?.error && <p className="mut">{va.error}</p>}
+        {va && !va.error && <>
+          <div className="lbl" style={{marginBottom:10}}>Different ways of filtering</div>
+          {va.variants.map(v=>{
+            const e = v.buy_edge_10d;
+            const c = !v.reliable?"var(--faint)":e==null?"var(--faint)":e>1?"var(--green)":e>0?"var(--amber)":"var(--red)";
+            return <div className="prow" key={v.name}>
+              <div className="dot" style={{background:c}}/>
+              <div className="mut">{v.plain || `${v.description}: ${v.buy_events} signals.`}</div>
+            </div>;
+          })}
+          <div className="expbody">{va.recommendation}</div>
+          <Exp text={va.warning}/>
+
+          <div style={{marginTop:18,paddingTop:16,borderTop:"1px solid var(--border)"}}>
+            {!ag && !aBusy && <>
+              <p className="mut">One stock can't settle this — with eight filters, something wins by luck
+                most of the time. This runs the same test across a dozen unrelated stocks with a proper
+                statistical correction.</p>
+              <button className="btn ghost" style={{marginTop:12,width:"100%"}} onClick={runAg}>Test across 12 stocks</button>
+              <p className="note">Takes 30–60 seconds.</p>
+            </>}
+            {aBusy && <Spin t="Testing 8 filters across 12 stocks…"/>}
+            {ag?.error && <p className="mut">{ag.error}</p>}
+            {ag && !ag.error && <>
+              <div className="lbl" style={{marginBottom:10}}>Cross-stock result ({ag.tickers_analyzed.length} stocks)</div>
+              {ag.results.map(r=><div className="prow" key={r.name}>
+                <div className="dot" style={{background:r.significant?"var(--green)":r.name==="baseline"?"var(--accent)":"var(--faint)"}}/>
+                <div className="mut" style={r.significant?{color:"var(--text)"}:{}}>{r.plain}</div>
+              </div>)}
+              <div className="expbody">{ag.conclusion}</div>
+              <Exp text={ag.method_note}/>
+            </>}
+          </div>
+        </>}
+      </div>
+    </>}
+  </div>;
+}
+
+/* ===== Position sizing — computed client-side from the stop distance ===== */
+function Sizer({entry, stop, currency, portfolioValue}) {
+  const [risk,setRisk] = useState(1);
+  if (entry == null || stop == null || !portfolioValue) return null;
+  const perShare = Math.abs(entry-stop);
+  if (perShare <= 0) return null;
+  const amt = portfolioValue*(risk/100);
+  const shares = Math.floor(amt/perShare);
+  const val = shares*entry, weight = (val/portfolioValue)*100;
+  return <div style={{background:"var(--bg)",borderRadius:10,padding:13,marginTop:14}}>
+    <b style={{fontSize:13.5}}>Position Sizing</b>
+    <p className="mut" style={{marginTop:3}}>How much to buy so a stop-out costs a fixed, survivable amount.</p>
+    <div className="lbl" style={{margin:"14px 0 8px"}}>Risk per trade</div>
+    <div className="chips">{[0.5,1,2,3].map(r=>
+      <div key={r} className={"chip"+(risk===r?" on":"")} onClick={()=>setRisk(r)}>{r}%</div>)}</div>
+    <Row l="Risk per share" v={`${perShare.toFixed(2)} ${currency}`}/>
+    <Row l="You'd risk" v={`${amt.toFixed(0)} ${currency}`}/>
+    <Row l="Shares to buy" v={shares>0?fmt(shares):"0 — too small"} c="var(--accent)"/>
+    <Row l="Position value" v={`${val.toFixed(0)} ${currency} (${weight.toFixed(0)}%)`} c={weight>25?"var(--amber)":null}/>
+    {weight>25 && <p className="note" style={{color:"var(--amber)",fontStyle:"normal"}}>
+      That's {weight.toFixed(0)}% of your portfolio in one stock. The stop caps the loss, but a gap down
+      past it would hurt more than {risk}% suggests.</p>}
+  </div>;
+}
+
+/* ===== Analyze ===== */
+function Analyze({state, dispatch}) {
+  const {q,data,busy,err,watchlist,holdings,portfolioValue} = state;
+  const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
+  const held = data ? holdings.find(h=>h.ticker===data.ticker) : null;
+
+  useEffect(()=>{
+    if (!focus || q.trim().length < 2) { setSugg([]); return; }
+    const t = setTimeout(async ()=>{
+      try { const j = await api(`/api/search?q=${encodeURIComponent(q.trim())}`); setSugg(j.results||[]); } catch {}
+    }, 320);
+    return ()=>clearTimeout(t);
+  },[q,focus]);
+
+  const go = sym => { setSugg([]); setFocus(false); dispatch({type:"analyze", ticker:sym||q}); };
+
+  return <>
+    <div className="searchbar">
+      <input value={q} placeholder="Company name or ticker — e.g. Apple, AAPL, SHOP.TO"
+        onChange={e=>dispatch({type:"q", v:e.target.value})}
+        onFocus={()=>setFocus(true)} onBlur={()=>setTimeout(()=>setFocus(false),160)}
+        onKeyDown={e=>e.key==="Enter"&&go()}/>
+      <button className="btn" onClick={()=>go()} disabled={busy}>{busy?"···":"Analyze"}</button>
+      {focus && sugg.length>0 && <div className="sugg">
+        {sugg.map(s=><div key={s.symbol} onMouseDown={()=>go(s.symbol)}>
+          <b className="num">{s.symbol}</b><span>{s.name}</span>{s.exchange&&<em>{s.exchange}</em>}
+        </div>)}
+      </div>}
+    </div>
+
+    {watchlist.length>0 && <>
+      <div className="lbl" style={{marginBottom:8}}>Watchlist</div>
+      <div className="chips">{watchlist.map(t=>
+        <div key={t} className={"chip"+(data?.ticker===t?" on":"")} onClick={()=>go(t)}>{t}</div>)}</div>
+    </>}
+
+    {busy && <Spin t="Fetching data & running FinBERT…"/>}
+    {err && !busy && <div className="err"><b>Couldn't load data</b>{err}</div>}
+    {!busy && !err && !data && <div className="center">
+      <h3>Search a ticker</h3>
+      <p>Technical signals, price targets, fundamentals, earnings, and AI-read news sentiment.</p>
+    </div>}
+
+    {data && !busy && <>
+      <div className="card alt">
+        <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+          <div style={{flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:9}}>
+              <b className="num" style={{fontSize:21}}>{data.ticker}</b>
+              <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{data.market}</span>
+            </div>
+            <div className="mut" style={{marginTop:4}}>{data.company_name}</div>
+          </div>
+          <button className="link" style={{fontSize:24,color:watchlist.includes(data.ticker)?"var(--amber)":"var(--faint)"}}
+            onClick={()=>dispatch({type:"watch", ticker:data.ticker})}>
+            {watchlist.includes(data.ticker)?"★":"☆"}</button>
+        </div>
+        <div style={{display:"flex",alignItems:"baseline",gap:8,marginTop:14}}>
+          <span className="big">{data.current_price ?? "—"}</span>
+          <span className="mut" style={{fontWeight:600}}>{data.currency}</span>
+        </div>
+        {data.price_change != null && <div className="chg" style={{color:data.price_change>=0?"var(--green)":"var(--red)"}}>
+          {data.price_change>=0?"▲":"▼"} {Math.abs(data.price_change)} ({Math.abs(data.price_change_pct)}%) today
+        </div>}
+        <Chart ticker={data.ticker} currency={data.currency}/>
+      </div>
+
+      <Readout t={data.technical_analysis}/>
+
+      {data.technical_analysis.source_ticker && <div className="banner" style={{borderLeftColor:"var(--accent)"}}>
+        <div className="lbl">Signal source</div>
+        <p>{data.ticker} trades too thin on its own for a reliable signal, so this is{" "}
+          <b style={{color:"var(--accent)"}}>{data.technical_analysis.source_ticker}</b>'s reading — the actual
+          company behind this CAD-hedged product. Price and levels below are still {data.ticker}'s own.</p>
+      </div>}
+
+      {data.data_quality?.warnings?.length>0 && data.data_quality.reliability!=="Good" &&
+        <div className="banner" style={{borderLeftColor:data.data_quality.reliability==="Poor"?"var(--red)":"var(--amber)"}}>
+          <div className="lbl">Signal reliability · {data.data_quality.reliability}</div>
+          {data.data_quality.warnings.map((w,i)=><p key={i}>{w}</p>)}
+        </div>}
+
+      {data.regime?.regime && data.regime.regime!=="Unknown" &&
+        <div className="banner" style={{borderLeftColor:/Falling|Choppy/.test(data.regime.regime)?"var(--amber)":"var(--green)"}}>
+          <div className="lbl">Market conditions · {data.regime.index_used}</div>
+          <b style={{display:"block",marginTop:4,color:/Falling|Choppy/.test(data.regime.regime)?"var(--amber)":"var(--green)"}}>{data.regime.regime}</b>
+          <p>{data.regime.note}</p>
+        </div>}
+
+      <div className="grid">
+        <div>
+          <div className="card">
+            <h2>Technical Detail</h2>
+            <Row l="RSI (14)" v={data.technical_analysis.rsi}/>
+            <Row l="MACD" v={data.technical_analysis.macd}/>
+            <Row l="MACD Signal" v={data.technical_analysis.macd_signal}/>
+            <Row l="MACD Histogram" v={data.technical_analysis.macd_histogram}/>
+            <Row l="Volume vs 20-day" v={data.technical_analysis.volume_ratio!=null?data.technical_analysis.volume_ratio+"×":null}
+              c={data.technical_analysis.volume_ratio>=1.5?"var(--green)":data.technical_analysis.volume_ratio<1?"var(--amber)":null}/>
+            <Row l="RSI Divergence" v={data.technical_analysis.divergence?
+              (data.technical_analysis.divergence==="bullish"?"Bullish":"Bearish"):"None detected"}
+              c={data.technical_analysis.divergence==="bullish"?"var(--green)":data.technical_analysis.divergence==="bearish"?"var(--red)":null}/>
+            <p className="note">{data.technical_analysis.reasoning}</p>
+            <Exp text={data.technical_analysis.divergence_note}/>
+          </div>
+
+          {held ? <HeldCard h={held} d={data} pv={portfolioValue}/> : <div className="card">
+            <h2>Price Targets</h2>
+            {data.price_targets.entry != null ? <>
+              <Row l="Entry" v={`${data.price_targets.entry} ${data.currency}`}/>
+              <div className="split">
+                <div><div className="lbl">Stop-Loss</div><b style={{color:"var(--red)"}}>{data.price_targets.stop_loss}</b></div>
+                <div><div className="lbl">Take-Profit</div><b style={{color:"var(--green)"}}>{data.price_targets.take_profit}</b></div>
+              </div>
+              <Row l="Reward : Risk" v={`${data.price_targets.risk_reward_ratio} : 1`}/>
+              <Sizer entry={data.price_targets.entry} stop={data.price_targets.stop_loss}
+                currency={data.currency} portfolioValue={portfolioValue}/>
+            </> : <p className="mut">No entry suggested — signal is {data.technical_analysis.signal}.</p>}
+            <div className="rule"/>
+            <Row l="Support (20-day)" v={data.price_targets.support!=null?`${data.price_targets.support} ${data.currency}`:null}/>
+            <Row l="Resistance (20-day)" v={data.price_targets.resistance!=null?`${data.price_targets.resistance} ${data.currency}`:null}/>
+            <p className="note">{data.price_targets.note}</p>
+          </div>}
+
+          <div className="card">
+            <h2>Fundamentals</h2>
+            <Row l="Market Cap" v={data.fundamentals.market_cap}/>
+            <Row l="P/E Ratio" v={data.fundamentals.pe_ratio}/>
+            <Row l="Beta" v={data.fundamentals.beta}/>
+            <Row l="Dividend Yield" v={data.fundamentals.dividend_yield!=null?data.fundamentals.dividend_yield+"%":null}/>
+            {data.fundamentals.sector && <Row l="Sector" v={data.fundamentals.sector}/>}
+            {data.fundamentals.position_in_range != null && <>
+              <div className="rule"/>
+              <Row l="52-week range" v={`${data.fundamentals.position_in_range}% of range`}/>
+              <div className="row" style={{fontSize:10.5,color:"var(--faint)"}}>
+                <span>{data.fundamentals.fifty_two_week_low}</span><span>{data.fundamentals.fifty_two_week_high}</span></div>
+            </>}
+          </div>
+        </div>
+
+        <div>
+          {data.quality && <div className="card">
+            <h2>Business Quality
+              <span className="pill" style={{color:{Strong:"var(--green)",Decent:"var(--accent)",Weak:"var(--amber)",Poor:"var(--red)"}[data.quality.grade]||"var(--muted)",
+                borderColor:"currentColor"}}>{data.quality.score!=null?`${data.quality.grade} ${data.quality.score}%`:data.quality.grade}</span>
+            </h2>
+            {data.quality.factors.map((f,i)=><div key={i} style={{display:"flex",gap:9,padding:"4px 0",fontSize:12.5}}>
+              <span style={{color:"var(--green)",fontWeight:800}}>✓</span><span>{f}</span></div>)}
+            {data.quality.concerns.map((c,i)=><div key={i} style={{display:"flex",gap:9,padding:"4px 0",fontSize:12.5}}>
+              <span style={{color:"var(--red)",fontWeight:800}}>!</span><span>{c}</span></div>)}
+            <Exp text={data.quality.note}/>
+          </div>}
+
+          {data.earnings && <div className="card">
+            <h2>Earnings</h2>
+            <Row l="Next earnings date" v={data.earnings.next_earnings_date || "Not scheduled"}/>
+            {data.earnings.recent_quarters.length>0 && <><div className="rule"/>
+              {data.earnings.recent_quarters.map((qq,i)=><div className="row" key={i}>
+                <span className="num">{qq.date}</span>
+                <span>{qq.eps_actual!=null?`$${qq.eps_actual}`:"—"}
+                  {qq.eps_estimate!=null?` vs $${qq.eps_estimate} est.`:""}
+                  {qq.surprise_pct!=null && <b style={{marginLeft:8,color:qq.surprise_pct>0?"var(--green)":"var(--red)"}}>
+                    {pct(qq.surprise_pct)}</b>}</span>
+              </div>)}</>}
+            <p className="note">{data.earnings.note}</p>
+          </div>}
+
+          <div className="card">
+            <h2>News Sentiment</h2>
+            <div className="row"><span>Bullish score</span>
+              <span style={{color:data.sentiment_analysis.bullish_score>.6?"var(--green)":data.sentiment_analysis.bullish_score<.4?"var(--red)":"var(--amber)"}}>
+                {Math.round(data.sentiment_analysis.bullish_score*100)}%</span></div>
+            <div style={{height:8,borderRadius:4,background:"var(--border)",overflow:"hidden",marginTop:4}}>
+              <div style={{height:"100%",width:`${data.sentiment_analysis.bullish_score*100}%`,
+                background:data.sentiment_analysis.bullish_score>.6?"var(--green)":data.sentiment_analysis.bullish_score<.4?"var(--red)":"var(--amber)"}}/></div>
+            <p className="plain" style={{marginTop:12}}>{data.sentiment_analysis.overall_impact}</p>
+            {data.sentiment_analysis.headlines.map((h,i)=><div className="hl" key={i}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <span className="mini" style={{color:SENT[h.sentiment],borderColor:"transparent",background:SENT[h.sentiment]+"1F",textTransform:"uppercase"}}>{h.sentiment}</span>
+                {h.publisher && <span style={{fontSize:10.5,color:"var(--faint)"}}>{h.publisher}</span>}
+              </div>
+              <div className="t">{h.link?<a href={h.link} target="_blank" rel="noopener" style={{color:"var(--text)"}}>{h.title}</a>:h.title}</div>
+              {h.context && <div className="ctx">{h.context}</div>}
+            </div>)}
+          </div>
+        </div>
+      </div>
+
+      <button className="btn ghost" style={{width:"100%",marginBottom:14}}
+        onClick={()=>dispatch({type:"logOpen"})}>Log what you decided →</button>
+      <Backtest ticker={data.ticker}/>
+      <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+        For informational purposes only — not financial advice.</p>
+    </>}
+  </>;
+}
+
+function HeldCard({h,d,pv}) {
+  const cost = h.shares*h.cost_basis, val = h.shares*(d.current_price||h.cost_basis);
+  const pl = val-cost, plPct = cost?(pl/cost)*100:0, weight = pv?(val/pv)*100:null;
+  const sig = d.technical_analysis.signal;
+  let guide;
+  if (sig==="SELL") guide = plPct>=0
+    ? `You're up ${plPct.toFixed(1)}% and momentum has turned negative. Whether to take the gain depends on your horizon and tax situation — but the chart no longer supports adding here.`
+    : `You're down ${Math.abs(plPct).toFixed(1)}% and momentum is still negative. Adding to a losing position because it's cheaper is the most common way a small loss becomes a large one.`;
+  else if (sig==="BUY") guide = weight>20
+    ? `Momentum is positive, but this is already ${weight.toFixed(0)}% of your portfolio. Adding concentrates risk rather than diversifying it.`
+    : "Momentum is positive and you already hold this. Adding is defensible, though it raises your average cost and moves your break-even up.";
+  else guide = "No momentum signal either way. Nothing here argues for changing the position.";
+
+  return <div className="card">
+    <h2>Your Position</h2>
+    <Row l="Shares held" v={h.shares}/>
+    <Row l="Average cost" v={`${h.cost_basis} ${d.currency}`}/>
+    <Row l="Current value" v={`${val.toFixed(0)} ${d.currency}`}/>
+    <Row l="Profit / loss" v={`${pl>=0?"+":""}${pl.toFixed(0)} (${plPct>=0?"+":""}${plPct.toFixed(1)}%)`}
+      c={pl>=0?"var(--green)":"var(--red)"}/>
+    {weight!=null && <Row l="Share of portfolio" v={`${weight.toFixed(0)}%`} c={weight>25?"var(--amber)":null}/>}
+    <Grad t={11}/>
+    <p className="plain">{guide}</p>
+    <Exp text="Why this card looks different: you already own this, so entry price and position sizing aren't the decision in front of you — add, trim, or hold is. The app deliberately won't tell you which; that depends on your horizon, tax position, and why you bought. What it can tell you is what the chart is doing and how much of your portfolio is riding on it."/>
+  </div>;
+}
+
+/* ===== Portfolio ===== */
+function Portfolio({state, dispatch}) {
+  const {holdings, cash} = state;
+  const [res,setRes] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [add,setAdd] = useState(false), [cashOpen,setCashOpen] = useState(false);
+  const [f,setF] = useState({ticker:"",shares:"",cost:"",deduct:true});
+  const [amt,setAmt] = useState("");
+  const [filter,setFilter] = useState("all"), [sortBy,setSortBy] = useState("value"), [dir,setDir] = useState("desc");
+  const [open,setOpen] = useState({});
+  const [sell,setSell] = useState(null);
+
+  const load = useCallback(async list => {
+    const t = list ?? holdings;
+    if (!t.length) { setRes(null); return; }
+    setBusy(true); setErr(null);
+    try {
+      const j = await api("/api/portfolio/analyze",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({holdings:t})});
+      setRes(j); dispatch({type:"pv", v:(j.total_value||0)+cash});
+    } catch(e){ setErr(e.message); } finally { setBusy(false); }
+  },[holdings,cash,dispatch]);
+
+  useEffect(()=>{ load(); },[holdings.length]);
+
+  const save = () => {
+    const t = f.ticker.trim().toUpperCase(), sh = parseFloat(f.shares), co = parseFloat(f.cost);
+    if (!t||!sh||!co||sh<=0||co<=0) return alert("Enter a ticker, share count, and average price paid.");
+    const total = sh*co;
+    if (f.deduct && total > cash) return alert(`This costs ${fmt(total)} but you only have ${fmt(cash)} in cash. Add cash first, or turn off "deduct from cash".`);
+    const ex = holdings.find(h=>h.ticker===t);
+    let next;
+    if (ex) { // merge with weighted-average cost rather than overwriting
+      const cs = ex.shares+sh;
+      next = holdings.map(h=>h.ticker===t?{ticker:t,shares:cs,
+        cost_basis:Math.round(((ex.shares*ex.cost_basis+sh*co)/cs)*100)/100}:h);
+    } else next = [...holdings,{ticker:t,shares:sh,cost_basis:co}];
+    dispatch({type:"holdings", v:next});
+    if (f.deduct) dispatch({type:"cash", v:cash-total});
+    setF({ticker:"",shares:"",cost:"",deduct:true}); setAdd(false); load(next);
+  };
+
+  const doSell = () => {
+    const sh = parseFloat(sell.shares), pr = parseFloat(sell.price);
+    const h = holdings.find(x=>x.ticker===sell.ticker);
+    if (!h||!sh||!pr||sh<=0||sh>h.shares||pr<=0) return alert(`Enter shares (up to ${h?.shares}) and a sale price.`);
+    const rem = h.shares-sh;
+    const next = rem>0.0001 ? holdings.map(x=>x.ticker===sell.ticker?{...x,shares:rem}:x)
+                            : holdings.filter(x=>x.ticker!==sell.ticker);
+    dispatch({type:"holdings", v:next}); dispatch({type:"cash", v:cash+sh*pr});
+    setSell(null); load(next);
+  };
+
+  const del = t => { if(!confirm(`Remove ${t}? This is for fixing a wrong entry — it won't change your cash. Use Sell to record a real sale.`))return;
+    const next = holdings.filter(h=>h.ticker!==t); dispatch({type:"holdings", v:next}); load(next); };
+
+  const cashOp = op => {
+    const a = parseFloat(amt);
+    if (!a||a<=0) return alert("Enter an amount greater than 0.");
+    if (op==="w" && a>cash) return alert(`You only have ${fmt(cash)} available.`);
+    dispatch({type:"cash", v:op==="w"?cash-a:cash+a}); setAmt(""); setCashOpen(false);
+  };
+
+  const sorted = res ? [...res.holdings].sort((a,b)=>{
+    const k = h => sortBy==="returns"?(h.unrealized_pl_pct??-1e9):sortBy==="today"?(h.day_pl_pct??-1e9):(h.market_value??-1e9);
+    return dir==="desc" ? k(b)-k(a) : k(a)-k(b);
+  }) : [];
+
+  return <>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
+      <div style={{flex:1}}><h1>Portfolio</h1><div className="tag">Your holdings · live P/L · signals</div></div>
+      <button className="btn sm ghost" onClick={()=>{setCashOpen(false);setAdd(!add);}}>{add?"Cancel":"+ Stock"}</button>
+      <button className="btn sm ghost" onClick={()=>{setAdd(false);setCashOpen(!cashOpen);}}>{cashOpen?"Cancel":"+ Cash"}</button>
+    </div>
+
+    {add && <div className="card">
+      <h2>Add a holding</h2>
+      <input placeholder="Ticker (e.g. AAPL)" value={f.ticker} style={{marginBottom:9}}
+        onChange={e=>setF({...f,ticker:e.target.value.toUpperCase()})}/>
+      <input placeholder="Number of shares" value={f.shares} style={{marginBottom:9}}
+        onChange={e=>setF({...f,shares:e.target.value})}/>
+      <input placeholder="Average price paid per share" value={f.cost} style={{marginBottom:12}}
+        onChange={e=>setF({...f,cost:e.target.value})}/>
+      <label style={{display:"flex",alignItems:"center",gap:9,fontSize:12.5,color:"var(--muted)",marginBottom:14,cursor:"pointer"}}>
+        <input type="checkbox" checked={f.deduct} style={{width:"auto"}}
+          onChange={e=>setF({...f,deduct:e.target.checked})}/> Deduct cost from cash balance</label>
+      <button className="btn" style={{width:"100%"}} onClick={save}>Save holding</button>
+    </div>}
+
+    {cashOpen && <div className="card">
+      <h2>Cash Balance</h2>
+      <p className="mut">Currently {fmt(cash)} available.</p>
+      <input placeholder="Amount" value={amt} style={{margin:"12px 0"}} onChange={e=>setAmt(e.target.value)}/>
+      <div style={{display:"flex",gap:9}}>
+        <button className="btn" style={{flex:1,background:"var(--red)"}} onClick={()=>cashOp("w")}>Withdraw</button>
+        <button className="btn" style={{flex:1}} onClick={()=>cashOp("d")}>Deposit</button>
+      </div>
+    </div>}
+
+    {busy && <Spin t="Pricing your holdings…"/>}
+    {err && <div className="err"><b>Couldn't load portfolio</b>{err}</div>}
+    {!busy && !holdings.length && !cash && <div className="center">
+      <h3>No holdings yet</h3><p>Add what you own to track profit/loss and get momentum signals on each position.</p></div>}
+
+    {!busy && (holdings.length>0 || cash!==0) && <>
+      <div className="card alt">
+        {holdings.length>0 && <div className="chips">
+          {[["all","All-Time"],["today","Today"]].map(([k,l])=>
+            <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+        </div>}
+        <div className="lbl">Total Value (CAD)</div>
+        <div className="big" style={{marginTop:6}}>{fmt(Math.round((res?.total_value||0)+cash))}</div>
+        {res && holdings.length>0 && (()=>{
+          const p = filter==="today"?res.total_day_pl:res.total_pl;
+          const pp = filter==="today"?res.total_day_pl_pct:res.total_pl_pct;
+          return <div className="chg" style={{color:p>=0?"var(--green)":"var(--red)"}}>
+            {p>=0?"▲":"▼"} {fmt(Math.abs(p))} ({Math.abs(pp)}%) {filter==="today"?"today":"overall"}</div>;
+        })()}
+        <div className="rule"/>
+        {res && <Row l="Holdings value (CAD)" v={fmt(res.total_value)}/>}
+        <Row l="Cash available" v={fmt(cash)}/>
+        {res && <Row l="Cost basis (CAD)" v={fmt(res.total_cost)}/>}
+        {res?.usd_cad_rate && res.holdings.some(h=>h.currency==="USD") &&
+          <p style={{fontSize:10.5,color:"var(--faint)",marginTop:6}}>USD holdings converted at 1 USD = {res.usd_cad_rate} CAD</p>}
+        {res && <p className="note">{res.summary}</p>}
+      </div>
+
+      {res?.concentration?.warnings?.length>0 && <div className="card">
+        <h2>Concentration Risk</h2>
+        {res.concentration.effective_positions!=null &&
+          <Row l="Effective positions" v={`${res.concentration.effective_positions} of ${res.holdings.length}`}
+            c={res.concentration.effective_positions<res.holdings.length*.5?"var(--amber)":null}/>}
+        {res.concentration.largest_position_pct!=null &&
+          <Row l="Largest position" v={`${res.concentration.largest_position_pct}%`}
+            c={res.concentration.largest_position_pct>30?"var(--amber)":null}/>}
+        {Object.entries(res.concentration.sector_concentration||{}).slice(0,4).map(([s,p])=>
+          <Row key={s} l={s} v={`${p}%`} c={p>40?"var(--amber)":null}/>)}
+        <div style={{background:"rgba(217,164,65,.08)",borderRadius:8,padding:11,marginTop:12}}>
+          {res.concentration.warnings.map((w,i)=><p key={i} style={{fontSize:11.5,lineHeight:1.55,marginBottom:5}}>• {w}</p>)}
+        </div>
+        <Exp text={res.concentration.note}/>
+      </div>}
+
+      {res && res.holdings.length>1 && <>
+        <div className="lbl" style={{marginBottom:8}}>Sort by</div>
+        <div className="chips">
+          {[["value","Value"],["returns","Returns %"],["today","Today"]].map(([k,l])=>
+            <div key={k} className={"chip"+(sortBy===k?" on":"")} onClick={()=>setSortBy(k)}>{l}</div>)}
+          <div className="chip" onClick={()=>setDir(dir==="desc"?"asc":"desc")}>
+            {dir==="desc"?"↓ High–Low":"↑ Low–High"}</div>
+        </div>
+      </>}
+
+      {sorted.map(h=>{
+        const v = filter==="today"?h.day_pl:h.unrealized_pl;
+        const vp = filter==="today"?h.day_pl_pct:h.unrealized_pl_pct;
+        const c = v==null?"var(--muted)":v>=0?"var(--green)":"var(--red)";
+        const sc = SIG[h.signal]||"var(--muted)";
+        return <div className="card" key={h.ticker}>
+          <div style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
+               onClick={()=>setOpen({...open,[h.ticker]:!open[h.ticker]})}>
+            <div style={{flex:1}}><b className="num" style={{fontSize:15}}>{h.ticker}</b>
+              <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}</div></div>
+            {v!=null && <div style={{textAlign:"right"}}>
+              <div className="num" style={{fontWeight:700,color:c}}>{v>=0?"+":""}{fmt(v)}</div>
+              <div className="num" style={{fontSize:11,color:c}}>{vp>=0?"+":""}{vp}%</div></div>}
+            <span style={{color:"var(--faint)",fontSize:11}}>{open[h.ticker]?"▲":"▼"}</span>
+          </div>
+          {open[h.ticker] && <div style={{marginTop:10}}>
+            <div className="rule"/>
+            {h.error ? <p className="mut">{h.error}</p> : <>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span className="mut" style={{fontSize:11.5}}>{h.shares} shares @ {h.cost_basis} {h.currency}</span>
+                <span className="mini" style={{color:sc,borderColor:sc+"66",background:sc+"1F"}}>{h.signal}</span>
+              </div>
+              <Row l="Market value" v={fmt(h.market_value)}/>
+              <Row l="All-time P/L" v={`${h.unrealized_pl>=0?"+":""}${fmt(h.unrealized_pl)} (${h.unrealized_pl_pct}%)`}
+                c={h.unrealized_pl>=0?"var(--green)":"var(--red)"}/>
+              {h.day_pl!=null && <Row l="Today's P/L" v={`${h.day_pl>=0?"+":""}${fmt(h.day_pl)} (${h.day_pl_pct}%)`}
+                c={h.day_pl>=0?"var(--green)":"var(--red)"}/>}
+              <Row l="RSI (14)" v={h.rsi}/>
+              <p className="note">{h.context}</p>
+            </>}
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)"}}>
+              <button className="link" onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>Full analysis →</button>
+              <div style={{display:"flex",gap:16}}>
+                {!h.error && <button className="link" style={{color:"var(--amber)"}}
+                  onClick={()=>setSell({ticker:h.ticker,shares:String(h.shares),price:String(h.current_price||"")})}>Sell</button>}
+                <button className="link" style={{color:"var(--red)"}} onClick={()=>del(h.ticker)}>Delete</button>
+              </div>
+            </div>
+          </div>}
+        </div>;
+      })}
+    </>}
+
+    {sell && <div className="modal" onClick={e=>e.target===e.currentTarget&&setSell(null)}>
+      <div className="box">
+        <h2>Sell {sell.ticker}</h2>
+        <div className="lbl" style={{margin:"12px 0 6px"}}>Shares to sell</div>
+        <input value={sell.shares} onChange={e=>setSell({...sell,shares:e.target.value})}/>
+        <div className="lbl" style={{margin:"12px 0 6px"}}>Sale price per share</div>
+        <input value={sell.price} onChange={e=>setSell({...sell,price:e.target.value})}/>
+        <div style={{display:"flex",gap:9,marginTop:16}}>
+          <button className="btn ghost" style={{flex:1}} onClick={()=>setSell(null)}>Cancel</button>
+          <button className="btn" style={{flex:1,background:"var(--green)"}} onClick={doSell}>Confirm sale</button>
+        </div>
+        <p className="note">Proceeds are added to your cash balance.</p>
+      </div>
+    </div>}
+  </>;
+}
+
+/* ===== Brief ===== */
+function Brief({state, dispatch}) {
+  const {holdings, watchlist} = state;
+  const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [refreshing,setRefreshing] = useState(false);
+
+  const load = useCallback(async (force)=>{
+    force ? setRefreshing(true) : setBusy(true); setErr(null);
+    try {
+      setD(await api(`/api/digest${force?"?force=true":""}`,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({holdings,watchlist})}));
+    } catch(e){ setErr(e.message); } finally { setBusy(false); setRefreshing(false); }
+  },[holdings,watchlist]);
+
+  useEffect(()=>{ load(); },[]);
+
+  const list = (rows,title,extra) => rows?.length>0 && <div className="card">
+    <h2>{title}{extra}</h2>
+    {rows.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+      <div style={{flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:9}}>
+          <b className="num">{h.ticker}</b>
+          <span className="mini" style={{color:SIG[h.signal],borderColor:SIG[h.signal]+"66",background:SIG[h.signal]+"1F"}}>{h.signal}</span>
+          <span style={{fontSize:10,color:"var(--faint)",fontWeight:600}}>{h.conviction}</span>
+        </div>
+        <div className="meta">RSI {h.rsi ?? "—"} · Vol {h.volume_ratio!=null?h.volume_ratio+"×":"—"}</div>
+      </div>
+      <div style={{textAlign:"right"}}>
+        <div className="num" style={{fontWeight:700}}>{h.price ?? "—"}</div>
+        {h.change_pct!=null && <div className="num" style={{fontSize:11.5,fontWeight:700,
+          color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div>}
+      </div>
+    </div>)}
+  </div>;
+
+  return <>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
+      <div style={{flex:1}}><h1>Morning Brief</h1><div className="tag">Portfolio · watchlist · opportunities</div></div>
+      <button className="btn sm ghost" onClick={()=>load(false)}>Refresh</button>
+    </div>
+    {busy && <Spin t="Scanning markets…"/>}
+    {err && <div className="err"><b>Couldn't load brief</b>{err}</div>}
+    {d && !busy && <>
+      <div className="card alt">
+        <p style={{fontSize:16,fontWeight:700,lineHeight:1.5}}>{d.headline}</p>
+        <p style={{fontSize:10.5,color:"var(--faint)",marginTop:7}}>{new Date(d.generated_at).toLocaleString()}</p>
+      </div>
+      {d.portfolio?.holdings?.length>0 && list(d.portfolio.holdings.map(h=>({
+        ticker:h.ticker,price:h.current_price,change_pct:h.unrealized_pl_pct,rsi:h.rsi,
+        volume_ratio:h.volume_ratio,signal:h.signal,conviction:h.conviction})),"Your Holdings")}
+      {list(d.watchlist_signals,"Your Watchlist")}
+      <div className="card">
+        <h2>Buy Signals <button className="link" onClick={()=>load(true)}>{refreshing?"···":"↻"}</button></h2>
+        {d.opportunities.length===0 ? <p className="mut">No buy signals in the scanned universe right now.</p>
+          : d.opportunities.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b>
+              <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · {h.conviction}</div></div>
+            <div style={{textAlign:"right"}}><div className="num" style={{fontWeight:700}}>{h.price}</div>
+              <div className="num" style={{fontSize:11.5,color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div></div>
+          </div>)}
+      </div>
+      {list(d.warnings,"Bearish Signals")}
+      {(d.under20_buys?.length>0 || d.under20_avoid?.length>0) && <div className="card">
+        <h2>Canadian Stocks Under $20</h2>
+        {d.under20_buys?.length>0 && <><div className="lbl" style={{marginBottom:4}}>Worth a look</div>
+          {d.under20_buys.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
+        {d.under20_avoid?.length>0 && <><div className="lbl" style={{margin:"12px 0 4px"}}>Avoid for now</div>
+          {d.under20_avoid.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
+        <p className="note">A fixed list of TSX/TSX-V names commonly under CAD $20 — not the whole exchange.
+          "Avoid" means negative momentum now, not a judgment on the business.</p>
+      </div>}
+      <div className="card"><p className="mut">{d.note}</p></div>
+    </>}
+  </>;
+}
+
+/* ===== Journal ===== */
+const agree = (sig,act) => act==="held" ? (sig==="HOLD"?"followed":"ignored")
+  : act==="bought" ? (sig==="BUY"?"followed":"overrode")
+  : act==="sold" ? (sig==="SELL"?"followed":"overrode") : "ignored";
+const daysSince = iso => Math.floor((Date.now()-new Date(iso).getTime())/864e5);
+const MIN_DAYS = 10;
+
+function Journal({state, dispatch}) {
+  const {journal} = state;
+  const [prices,setPrices] = useState({});
+  useEffect(()=>{
+    if (!journal.length) return;
+    const ts = [...new Set(journal.map(e=>e.ticker))].join(",");
+    api(`/api/quotes?tickers=${ts}`).then(j=>{
+      const m = {}; j.quotes.forEach(q=>{ if(q.price) m[q.ticker]=q.price; }); setPrices(m);
+    }).catch(()=>{});
+  },[journal.length]);
+
+  const ret = e => { const p = prices[e.ticker];
+    if (!p||!e.price) return null;
+    const raw = (p/e.price-1)*100;
+    return e.action==="sold" ? -raw : e.action==="held" ? null : raw; };
+
+  const scored = journal.map(e=>({e,d:daysSince(e.logged_at),r:ret(e)}))
+    .filter(x=>x.r!=null && x.d>=MIN_DAYS);
+  const fol = scored.filter(x=>agree(x.e.app_signal,x.e.action)==="followed");
+  const ovr = scored.filter(x=>agree(x.e.app_signal,x.e.action)==="overrode");
+  const avg = a => a.length ? a.reduce((s,x)=>s+x.r,0)/a.length : null;
+  const fa = avg(fol), oa = avg(ovr), few = fol.length<5||ovr.length<5;
+
+  let verdict;
+  if (!scored.length) verdict = `No decisions are old enough to judge yet — entries need ${MIN_DAYS}+ days before the outcome means anything. Judging sooner is measuring noise.`;
+  else if (few) verdict = `Too few decisions to draw conclusions (${fol.length} followed, ${ovr.length} overrode). You'd want at least 5 of each, and really 20+, before reading anything into the difference.`;
+  else if (oa>fa+1) verdict = `Your overrides have outperformed the app by ${(oa-fa).toFixed(1)}% on average. Your judgement is adding something — though check whether those clustered in one lucky stretch.`;
+  else if (fa>oa+1) verdict = `Following the app has outperformed your overrides by ${(fa-oa).toFixed(1)}%. Worth reading back through why you overrode — there may be a correctable pattern.`;
+  else verdict = "Following the app and overriding it have produced roughly similar results so far.";
+
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Journal</h1><div className="tag">What you decided · how it turned out</div></div>
+    {!journal.length ? <div className="center"><h3>No entries yet</h3>
+      <p>When you analyze a stock, use "Log what you decided" to record what you did and why.
+        Over time this shows whether your instincts beat the app's signals — the one thing almost
+        no investor actually measures.</p></div> : <>
+      <div className="card">
+        <h2>Scorecard</h2>
+        {scored.length>0 && <>
+          <Row l={`Followed the app (${fol.length})`} v={fa!=null?`${fa>=0?"+":""}${fa.toFixed(1)}%`:"—"}
+            c={fa!=null?(fa>=0?"var(--green)":"var(--red)"):null}/>
+          <Row l={`Overrode the app (${ovr.length})`} v={oa!=null?`${oa>=0?"+":""}${oa.toFixed(1)}%`:"—"}
+            c={oa!=null?(oa>=0?"var(--green)":"var(--red)"):null}/>
+          <div className="rule"/>
+        </>}
+        <p className="plain">{verdict}</p>
+        <Exp text={`How this is scored. The app records what it recommended and what you did as separate facts, then works out whether you agreed — rather than asking afterwards, which invites flattering yourself. Returns run from the price when you logged the decision to today, flipped for sells. Entries younger than ${MIN_DAYS} days are excluded because short-horizon outcomes are mostly noise. Do-nothing entries aren't scored.`}/>
+      </div>
+      {[...journal].sort((a,b)=>new Date(b.logged_at)-new Date(a.logged_at)).map(e=>{
+        const d = daysSince(e.logged_at), r = ret(e), early = d<MIN_DAYS;
+        const ag = agree(e.app_signal,e.action);
+        const ac = ag==="followed"?"var(--accent)":ag==="overrode"?"var(--amber)":"var(--faint)";
+        return <div className="card" key={e.id}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div><b className="num" style={{fontSize:15}}>{e.ticker}</b>
+              <div className="mut" style={{fontSize:11.5}}>{new Date(e.logged_at).toLocaleDateString()} · {d}d ago</div></div>
+            {r!=null && !early && <div className="num" style={{fontWeight:700,fontSize:15,
+              color:r>=0?"var(--green)":"var(--red)"}}>{r>=0?"+":""}{r.toFixed(1)}%</div>}
+          </div>
+          <div style={{display:"flex",gap:8,margin:"10px 0"}}>
+            <span className="mini" style={{color:SIG[e.app_signal],borderColor:SIG[e.app_signal]+"66",background:SIG[e.app_signal]+"1F"}}>APP: {e.app_signal}</span>
+            <span className="mini" style={{color:ac,borderColor:ac+"66",background:ac+"1F"}}>YOU: {e.action.toUpperCase()}</span>
+          </div>
+          <Row l="Price when logged" v={e.price}/>
+          {prices[e.ticker] && <Row l="Price now" v={prices[e.ticker]}/>}
+          {early && <p className="note">Too early to judge — needs {MIN_DAYS-d} more day{MIN_DAYS-d===1?"":"s"}.</p>}
+          {e.action==="held" && <p className="note">Not scored — no position was taken.</p>}
+          {e.note && <div style={{background:"var(--bg)",borderRadius:8,padding:11,marginTop:12}}>
+            <div className="lbl" style={{marginBottom:5}}>Your reasoning</div>
+            <p style={{fontSize:12.5,lineHeight:1.55}}>{e.note}</p></div>}
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)"}}>
+            <span className="mut" style={{fontSize:11.5}}>
+              {ag==="followed"?"Followed the app":ag==="overrode"?"Went against the app":"No action on signal"}</span>
+            <button className="link" style={{color:"var(--red)"}}
+              onClick={()=>confirm("Remove this entry?")&&dispatch({type:"journal", v:journal.filter(x=>x.id!==e.id)})}>Delete</button>
+          </div>
+        </div>;
+      })}
+    </>}
+  </>;
+}
+
+/* ===== Log decision modal ===== */
+function LogModal({data, onSave, onClose}) {
+  const [act,setAct] = useState(null), [note,setNote] = useState("");
+  const t = data.technical_analysis;
+  return <div className="modal" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="box">
+      <h2>Log decision — {data.ticker}<button className="link" onClick={onClose}>✕</button></h2>
+      <div style={{background:"var(--card)",borderRadius:10,padding:13,marginBottom:14}}>
+        <div className="lbl">The app said</div>
+        <b className="num" style={{color:SIG[t.signal],fontSize:15,display:"block",marginTop:5}}>
+          {t.signal} · {t.conviction} conviction · {data.current_price}</b>
+      </div>
+      <div className="lbl">What did you do?</div>
+      {[["bought","Bought","Opened or added to a position"],
+        ["sold","Sold","Closed or trimmed a position"],
+        ["held","Did nothing","No action taken"]].map(([k,l,h])=>
+        <div key={k} className={"opt"+(act===k?" on":"")} onClick={()=>setAct(k)}>
+          <b style={act===k?{color:"var(--accent)"}:{}}>{l}</b><span>{h}</span></div>)}
+      {act && <div className="expbody" style={{marginTop:12}}>
+        {agree(t.signal,act)==="followed" ? "This follows the app's signal."
+          : agree(t.signal,act)==="overrode" ? "This goes against the app's signal — worth noting why."
+          : "The app suggested something; you're not acting on it."}</div>}
+      <div className="lbl" style={{margin:"16px 0 8px"}}>Why? (the most useful part)</div>
+      <textarea rows="4" placeholder="What's your reasoning? Future you will want to know."
+        value={note} onChange={e=>setNote(e.target.value)}/>
+      <button className="btn" style={{width:"100%",marginTop:14}} onClick={()=>{
+        if (!act) return alert("Pick what you actually did.");
+        onSave({id:`${data.ticker}-${Date.now()}`,ticker:data.ticker,logged_at:new Date().toISOString(),
+          app_signal:t.signal,app_conviction:t.conviction,price:data.current_price,action:act,note:note.trim()});
+      }}>Save to journal</button>
+    </div>
+  </div>;
+}
+
+/* ===== Root ===== */
+function App() {
+  const [tab,setTab] = useState("analyze");
+  const [q,setQ] = useState("");
+  const [data,setData] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
+  const [holdings,setHoldings] = useState(()=>store.get("ma_portfolio",[]));
+  const [cash,setCash] = useState(()=>store.get("ma_cash",0));
+  const [journal,setJournal] = useState(()=>store.get("ma_journal",[]));
+  const [portfolioValue,setPV] = useState(0);
+  const [logOpen,setLogOpen] = useState(false);
+
+  const analyze = useCallback(async sym => {
+    const s = (sym||"").trim().toUpperCase();
+    if (!s) return;
+    setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null);
+    try { setData(await api(`/api/analyze/${encodeURIComponent(s)}`)); }
+    catch(e){ setErr(e.message); } finally { setBusy(false); }
+  },[]);
+
+  const dispatch = useCallback(a => {
+    switch(a.type){
+      case "q": setQ(a.v); break;
+      case "analyze": analyze(a.ticker); break;
+      case "watch": { const n = watchlist.includes(a.ticker)?watchlist.filter(t=>t!==a.ticker):[...watchlist,a.ticker];
+        setWatchlist(n); store.set("ma_watchlist",n); break; }
+      case "holdings": setHoldings(a.v); store.set("ma_portfolio",a.v); break;
+      case "cash": setCash(a.v); store.set("ma_cash",a.v); break;
+      case "journal": setJournal(a.v); store.set("ma_journal",a.v); break;
+      case "pv": setPV(a.v); break;
+      case "logOpen": setLogOpen(true); break;
+    }
+  },[watchlist,analyze]);
+
+  const state = {q,data,busy,err,watchlist,holdings,cash,journal,portfolioValue};
+
+  return <>
+    <header><div className="hdr">
+      <div className="logo"><Logo/></div>
+      <div><h1>Market Analyzer</h1><div className="tag">Measured signals · not predictions</div></div>
+      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["brief","Brief"],["journal","Journal"]].map(([k,l])=>
+        <button key={k} className={tab===k?"on":""} onClick={()=>setTab(k)}>{l}</button>)}</nav>
+    </div></header>
+    <div className="wrap">
+      {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
+      {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
+      {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
+      {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
+    </div>
+    {logOpen && data && <LogModal data={data} onClose={()=>setLogOpen(false)}
+      onSave={e=>{ const n=[e,...journal]; setJournal(n); store.set("ma_journal",n); setLogOpen(false);
+        alert("Saved to your journal. Check back in a couple of weeks to see how it turned out."); }}/>}
+  </>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
