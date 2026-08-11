@@ -7,6 +7,7 @@ company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ import pandas as pd
 import torch
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
@@ -163,6 +165,7 @@ class TechnicalAnalysis(BaseModel):
     signal: str
     conviction: str
     reasoning: str
+    source_ticker: Optional[str] = None
 
 
 class Fundamentals(BaseModel):
@@ -1262,6 +1265,10 @@ def search_symbols(query: str) -> List[SymbolMatch]:
 # ---------------------------------------------------------------------------
 @app.get("/")
 def root():
+    """Serves the web app. /health remains the machine-readable status check."""
+    web_path = os.path.join(os.path.dirname(__file__), "web", "index.html")
+    if os.path.exists(web_path):
+        return FileResponse(web_path)
     return {"status": "ok", "service": "Stock Market Analysis API"}
 
 
@@ -1336,13 +1343,52 @@ def analyze(ticker: str):
     quality = compute_quality_score(info)
     data_quality = assess_data_quality(ticker, hist, info)
 
+    # For a CAD-hedged / CDR product, try to substitute a reliable signal from
+    # the actual underlying stock rather than just penalizing conviction on a
+    # signal that's fundamentally noise. Fails closed: if no trustworthy
+    # underlying is found, falls through to the conviction penalty below —
+    # this stays graceful degradation, never a wrong substitution.
+    underlying_hist = None
+    if data_quality.is_derivative:
+        try:
+            underlying = resolve_underlying_ticker(ticker, info, data_quality.avg_daily_volume)
+        except Exception as e:
+            logger.info(f"Underlying resolution failed for {ticker}: {e}")
+            underlying = None
+
+        if underlying:
+            try:
+                _u_stock, underlying_hist = fetch_price_history(underlying["ticker"])
+            except Exception as e:
+                logger.info(f"Underlying fetch failed for {underlying['ticker']}: {e}")
+                underlying_hist = None
+
+            if underlying_hist is not None and not underlying_hist.empty and len(underlying_hist) >= 30:
+                u_ticker = underlying["ticker"]
+                technical = compute_technicals(underlying_hist)
+                technical.source_ticker = u_ticker
+                technical.reasoning = (
+                    f"This is {u_ticker}'s own signal — {ticker} trades too thin on its own "
+                    f"for RSI/MACD to be dependable, so its numbers are borrowed from the "
+                    f"primary listing instead. {technical.reasoning}"
+                )
+                data_quality.warnings.insert(
+                    0,
+                    f"{ticker} is a CAD-hedged product tracking {u_ticker}. Its own trading "
+                    f"is too thin for reliable signals, so the reading above is {u_ticker}'s "
+                    "own — computed from a listing with far more volume.",
+                )
+            else:
+                underlying_hist = None  # resolution found something but data fetch failed
+
     # A signal computed on thin data shouldn't carry the same weight as one
-    # computed on a liquid name, regardless of how clean the numbers look.
-    if data_quality.reliability == "Poor":
-        technical.conviction = "Low"
-        technical.reasoning += " Conviction capped at Low: this listing trades too thinly for the indicators to be dependable."
-    elif data_quality.reliability == "Fair" and technical.conviction == "High":
-        technical.conviction = "Moderate"
+    # computed on a liquid name — unless it was already substituted above.
+    if underlying_hist is None:
+        if data_quality.reliability == "Poor":
+            technical.conviction = "Low"
+            technical.reasoning += " Conviction capped at Low: this listing trades too thinly for the indicators to be dependable."
+        elif data_quality.reliability == "Fair" and technical.conviction == "High":
+            technical.conviction = "Moderate"
 
     regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
     earnings = fetch_earnings(stock)
@@ -3002,3 +3048,84 @@ def assess_data_quality(
         warnings=warnings,
         note=note,
     )
+
+
+# ===========================================================================
+# HEDGED / CDR SIGNAL SUBSTITUTION
+#
+# Prompted by a real case: TSLA.NE (Tesla's CAD-hedged CDR on NEO) showed a
+# different signal than TSLA itself. Both can't be describing Tesla — the CDR
+# trades a small fraction of the volume, so its RSI/MACD mostly reflect the
+# wrapper's own thin trading, not the business.
+#
+# CDR tickers do NOT reliably relate to their underlying ticker — confirmed
+# via research: Chevron's CDR trades as CHEV (underlying CVX), Citigroup's as
+# CITI (underlying C). Suffix-stripping would silently get these wrong. What
+# IS reliable is Yahoo's own name for the instrument, which says "CDR (CAD
+# Hedged)" and sometimes includes the real ticker in parentheses directly —
+# e.g. "TESLA (TSLA) BMO CDR (CAD HEDGE". That's what this matches on.
+# ===========================================================================
+
+HEDGE_NAME_PATTERN = re.compile(
+    r"(cad[\s\-]?hedge|usd[\s\-]?hedge|\bhedged?\b|\bcdr\b|depositary receipt|depository receipt)",
+    re.IGNORECASE,
+)
+TICKER_HINT_PATTERN = re.compile(r"\(([A-Z]{1,5})\)")
+_NOT_A_TICKER = {"CDR", "CAD", "USD", "ETF", "INC", "CORP", "LTD"}
+
+
+def resolve_underlying_ticker(
+    ticker: str, info: dict, thin_avg_volume: Optional[int]
+) -> Optional[dict]:
+    """
+    For a CAD-hedged / CDR product, find the actual primary listing so a
+    reliable signal can be shown instead of one computed on thin wrapper
+    volume. Returns {"ticker": ..., "avg_volume": ...} or None if nothing
+    trustworthy was found — this fails closed, not open.
+    """
+    name = info.get("longName") or info.get("shortName") or ""
+    if not HEDGE_NAME_PATTERN.search(name):
+        return None
+
+    candidates: List[str] = []
+
+    # Fast path: the name sometimes hands us the real ticker directly, e.g.
+    # "TESLA (TSLA) BMO CDR (CAD HEDGE".
+    for m in TICKER_HINT_PATTERN.finditer(name):
+        token = m.group(1)
+        if token not in _NOT_A_TICKER:
+            candidates.append(token)
+
+    # Fallback: search by the company name with the CDR qualifier cut off.
+    cdr_match = re.search(r"\bcdr\b", name, re.IGNORECASE)
+    base_name = name[: cdr_match.start()] if cdr_match else name
+    base_name = TICKER_HINT_PATTERN.sub(" ", base_name)
+    base_name = re.sub(r"[,.]", " ", base_name)
+    base_name = re.sub(r"\s+", " ", base_name).strip()
+    if base_name:
+        try:
+            candidates.extend(c.symbol.strip().upper() for c in search_symbols(base_name))
+        except Exception as e:
+            logger.info(f"Underlying search failed for '{base_name}': {e}")
+
+    seen = set()
+    for cand in candidates:
+        cand = cand.strip().upper()
+        if not cand or cand == ticker.strip().upper() or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            chist = yf.Ticker(cand).history(period="3mo", interval="1d")
+            if chist is None or chist.empty or len(chist) < 30:
+                continue
+            cand_vol = int(chist["Volume"].tail(30).mean())
+        except Exception:
+            continue
+
+        # Require the candidate to be meaningfully more liquid — otherwise
+        # this isn't really "the main stock", just another thin listing.
+        threshold = max((thin_avg_volume or 0) * 5, 200_000)
+        if cand_vol > threshold:
+            return {"ticker": cand, "avg_volume": cand_vol}
+
+    return None
