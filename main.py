@@ -219,6 +219,47 @@ class SentimentAnalysis(BaseModel):
     headlines: List[Headline]
 
 
+class CorrelatedPair(BaseModel):
+    ticker_a: str
+    ticker_b: str
+    correlation: float
+
+
+class DataQuality(BaseModel):
+    reliability: str            # "Good" | "Fair" | "Poor"
+    avg_daily_volume: Optional[int]
+    instrument_type: Optional[str]
+    is_derivative: bool
+    warnings: List[str]
+    note: str
+
+
+class ConcentrationReport(BaseModel):
+    highly_correlated_pairs: List[CorrelatedPair]
+    largest_position_pct: Optional[float]
+    top_three_pct: Optional[float]
+    effective_positions: Optional[float]
+    sector_concentration: Dict[str, float]
+    warnings: List[str]
+    note: str
+
+
+class QualityScore(BaseModel):
+    score: Optional[int]
+    grade: str
+    factors: List[str]
+    concerns: List[str]
+    note: str
+
+
+class MarketRegime(BaseModel):
+    regime: str
+    index_used: str
+    index_vs_200ma: Optional[float]
+    volatility_percentile: Optional[float]
+    note: str
+
+
 class AnalysisResponse(BaseModel):
     ticker: str
     company_name: str
@@ -2565,22 +2606,6 @@ def backtest_aggregate(tickers: str = "", period: str = "5y"):
 # Canadian banks. Correlation makes that visible.
 # ===========================================================================
 
-class CorrelatedPair(BaseModel):
-    ticker_a: str
-    ticker_b: str
-    correlation: float
-
-
-class ConcentrationReport(BaseModel):
-    highly_correlated_pairs: List[CorrelatedPair]
-    largest_position_pct: Optional[float]
-    top_three_pct: Optional[float]
-    effective_positions: Optional[float]
-    sector_concentration: Dict[str, float]
-    warnings: List[str]
-    note: str
-
-
 def analyze_concentration(
     holdings: List[HoldingResult], sectors: Dict[str, str]
 ) -> ConcentrationReport:
@@ -2695,14 +2720,6 @@ def analyze_concentration(
 # chart pattern on one burning cash.
 # ===========================================================================
 
-class QualityScore(BaseModel):
-    score: Optional[int]
-    grade: str
-    factors: List[str]
-    concerns: List[str]
-    note: str
-
-
 def compute_quality_score(info: dict) -> QualityScore:
     def num(key):
         v = info.get(key)
@@ -2791,14 +2808,6 @@ def compute_quality_score(info: dict) -> QualityScore:
 # Knowing which one you're in is more useful than another indicator.
 # ===========================================================================
 
-class MarketRegime(BaseModel):
-    regime: str
-    index_used: str
-    index_vs_200ma: Optional[float]
-    volatility_percentile: Optional[float]
-    note: str
-
-
 _REGIME_CACHE: Dict[str, Tuple[float, Any]] = {}
 
 
@@ -2870,8 +2879,8 @@ def market_regime(canadian: bool = False):
 
 # Forward references (QualityScore, MarketRegime, ConcentrationReport are
 # defined after the response models that reference them).
-AnalysisResponse.model_rebuild()
-PortfolioResponse.model_rebuild()
+# (No model_rebuild() needed — every model's dependencies are now defined
+# before the routes that use them, verified by static analysis above.)
 
 
 # ===========================================================================
@@ -2951,15 +2960,6 @@ def quotes(tickers: str = ""):
 # assumption breaks, the numbers still compute and look authoritative. This
 # flags when they shouldn't be trusted.
 # ===========================================================================
-
-class DataQuality(BaseModel):
-    reliability: str            # "Good" | "Fair" | "Poor"
-    avg_daily_volume: Optional[int]
-    instrument_type: Optional[str]
-    is_derivative: bool
-    warnings: List[str]
-    note: str
-
 
 DERIVATIVE_HINTS = (
     "HEDGED", "CAD-HEDGED", "ETF", "ETN", "TRUST", "INDEX", "2X", "3X",
