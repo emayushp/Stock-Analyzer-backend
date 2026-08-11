@@ -18,6 +18,7 @@ RUN grep -v "^torch" requirements.txt > requirements-no-torch.txt \
 RUN pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
 
 COPY main.py .
+COPY web ./web
 
 ENV PORT=8000
 EXPOSE 8000
