@@ -3129,3 +3129,171 @@ def resolve_underlying_ticker(
             return {"ticker": cand, "avg_volume": cand_vol}
 
     return None
+
+
+# ===========================================================================
+# CONVICTION-LEVEL BACKTESTING
+#
+# The live app labels every signal High/Moderate/Low conviction, based on
+# volume — and that label drives real behavior: it downgrades unreliable
+# signals, it's the first thing shown on the readout. But it's never been
+# tested. This checks whether "High conviction" BUY signals have actually
+# outperformed "Low conviction" ones, or whether the label is decorative.
+#
+# Method mirrors the existing backtest: events are anchored to the START of
+# each signal run (not every day it's active — the bug already found and
+# fixed once this build), classified by conviction on the day the signal
+# FIRED (matching how a person actually uses it — checked once, at signal
+# onset, not re-checked daily), and compared against the same random-day
+# baseline used everywhere else in this app.
+# ===========================================================================
+
+CONVICTION_MIN_EVENTS = 8
+
+
+def classify_conviction_value(vol_ratio: Optional[float]) -> str:
+    """Same thresholds as the live signal's generate_signal(), kept in sync deliberately."""
+    if vol_ratio is None or (isinstance(vol_ratio, float) and math.isnan(vol_ratio)):
+        return "Moderate"
+    if vol_ratio >= 1.5:
+        return "High"
+    if vol_ratio >= 1.0:
+        return "Moderate"
+    return "Low"
+
+
+class ConvictionBucket(BaseModel):
+    conviction: str
+    event_count: int
+    avg_return_10d: Optional[float]
+    win_rate_10d: Optional[float]
+    edge_10d: Optional[float]
+    plain: str
+
+
+class ConvictionBacktest(BaseModel):
+    ticker: str
+    period: str
+    buy_buckets: List[ConvictionBucket]
+    sell_buckets: List[ConvictionBucket]
+    verdict: str
+    caveats: str
+    generated_at: str
+
+
+def _conviction_buckets_for(df: pd.DataFrame, signal_name: str) -> List[ConvictionBucket]:
+    base = df["base_signal"]
+    active = base == signal_name
+    starts = active & ~active.shift(1, fill_value=False)
+    event_index = df.index[starts]
+
+    raw: Dict[str, list] = {"High": [], "Moderate": [], "Low": []}
+    for idx in event_index:
+        vr = df.loc[idx, "vol_ratio"] if "vol_ratio" in df.columns else None
+        conv = classify_conviction_value(vr if pd.notna(vr) else None)
+        fwd = df.loc[idx, "fwd10"]
+        if pd.notna(fwd):
+            raw[conv].append(float(fwd))
+
+    baseline = df["fwd10"].dropna()
+    base_avg = float(baseline.mean()) * 100 if len(baseline) else None
+
+    buckets = []
+    for conv in ["High", "Moderate", "Low"]:
+        vals = raw[conv]
+        n = len(vals)
+        if n == 0:
+            buckets.append(ConvictionBucket(
+                conviction=conv, event_count=0, avg_return_10d=None,
+                win_rate_10d=None, edge_10d=None,
+                plain=f"{conv} conviction: no {signal_name} signals of this type in this period.",
+            ))
+            continue
+
+        avg = float(np.mean(vals)) * 100
+        if signal_name == "SELL":
+            win = float(np.mean([v < 0 for v in vals])) * 100
+            edge = (base_avg - avg) if base_avg is not None else None
+        else:
+            win = float(np.mean([v > 0 for v in vals])) * 100
+            edge = (avg - base_avg) if base_avg is not None else None
+
+        if n < CONVICTION_MIN_EVENTS:
+            plain = f"{conv} conviction: only {n} signals — too few to judge."
+        elif edge is not None and edge > 0.5:
+            plain = f"{conv} conviction: beat random days by {edge:+.2f}% on average, across {n} signals."
+        elif edge is not None and edge > 0:
+            plain = f"{conv} conviction: barely beat random days ({edge:+.2f}%) across {n} signals — thin."
+        else:
+            plain = f"{conv} conviction: did no better than random days across {n} signals."
+
+        buckets.append(ConvictionBucket(
+            conviction=conv, event_count=n, avg_return_10d=round(avg, 2),
+            win_rate_10d=round(win, 1),
+            edge_10d=round(edge, 2) if edge is not None else None,
+            plain=plain,
+        ))
+    return buckets
+
+
+def backtest_conviction(ticker: str, period: str = "5y") -> ConvictionBacktest:
+    ticker = ticker.strip().upper()
+    df = _prepare_indicator_frame(ticker, period)
+
+    buy_buckets = _conviction_buckets_for(df, "BUY")
+    sell_buckets = _conviction_buckets_for(df, "SELL")
+
+    def find(buckets, name):
+        b = next((x for x in buckets if x.conviction == name), None)
+        return b.edge_10d if b and b.event_count >= CONVICTION_MIN_EVENTS else None
+
+    high_edge, low_edge = find(buy_buckets, "High"), find(buy_buckets, "Low")
+
+    if high_edge is None or low_edge is None:
+        verdict = (
+            "Not enough signals in both the High and Low conviction buckets to compare them "
+            "meaningfully on this stock — conviction naturally produces a small High-volume "
+            "bucket, so this is common on quieter names."
+        )
+    elif high_edge > low_edge + 0.5:
+        verdict = (
+            f"Conviction is doing real work here: High-conviction BUY signals beat "
+            f"Low-conviction ones by {high_edge - low_edge:.2f}% on average. The volume check "
+            "is adding genuine information on this stock."
+        )
+    elif low_edge > high_edge + 0.5:
+        verdict = (
+            f"Conviction reads backwards on this stock: Low-conviction BUY signals actually "
+            f"did better than High-conviction ones, by {low_edge - high_edge:.2f}%. Worth "
+            "treating the conviction label skeptically here specifically."
+        )
+    else:
+        verdict = (
+            "High and Low conviction signals performed about the same here. Conviction isn't "
+            "clearly adding information on this stock — it may just be noise dressed up as a "
+            "confidence level."
+        )
+
+    caveats = (
+        "This splits an already-modest number of signals into three smaller groups, so each "
+        "bucket's sample is small — check the event count before trusting any single number. "
+        "The High-conviction bucket is naturally the thinnest, since it requires a real volume "
+        "spike. This looks at one stock over one period and describes the past, not a guarantee "
+        "about what conviction will mean going forward."
+    )
+
+    return ConvictionBacktest(
+        ticker=ticker, period=period, buy_buckets=buy_buckets, sell_buckets=sell_buckets,
+        verdict=verdict, caveats=caveats, generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/api/backtest/{ticker}/conviction", response_model=ConvictionBacktest)
+def backtest_conviction_endpoint(ticker: str, period: str = "5y"):
+    """
+    Does this app's own conviction label (High/Moderate/Low) actually predict
+    better outcomes, or is it decorative? Tests the claim rather than assuming it.
+    """
+    if period not in ("2y", "5y", "10y"):
+        period = "5y"
+    return backtest_conviction(ticker, period)
