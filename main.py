@@ -166,6 +166,9 @@ class TechnicalAnalysis(BaseModel):
     conviction: str
     reasoning: str
     source_ticker: Optional[str] = None
+    track_record_edge: Optional[float] = None
+    track_record_events: Optional[int] = None
+    track_record_note: str = ""
 
 
 class Fundamentals(BaseModel):
@@ -645,6 +648,94 @@ def compute_price_targets(
         risk_reward_ratio=risk_reward_ratio, support=support,
         resistance=resistance, note=note,
     )
+
+
+# ---------------------------------------------------------------------------
+# TRACK-RECORD-INFORMED CONVICTION
+#
+# Closes the loop between the backtesting tools and the live signal. Every
+# other conviction modifier in this app (volume, data quality, earnings
+# proximity) is a heuristic about whether to trust a signal. This one is
+# different: it's the stock's own measured history, using the exact same
+# event-anchored, baseline-compared methodology already validated for the
+# on-demand backtest — reused directly, not reimplemented, to avoid any
+# drift between what this shows and what the Backtest card reports.
+#
+# Deliberately conservative by design: this can nudge conviction one notch
+# up or down, and never touches signal direction. A stock's history not
+# supporting today's BUY doesn't mean the BUY is wrong — RSI/MACD crossing
+# a threshold is still the same simple, auditable rule it always was. This
+# only adjusts how much weight to put behind it.
+# ---------------------------------------------------------------------------
+_TRACK_RECORD_CACHE: Dict[str, Tuple[float, Any]] = {}
+_TRACK_RECORD_TTL_SECONDS = 86400  # 24h — backtest results don't meaningfully shift within a day
+TRACK_RECORD_MIN_EVENTS = 8
+TRACK_RECORD_STRONG_EDGE = 1.0  # percentage points, net of trading costs
+
+
+def get_ticker_track_record(ticker: str) -> Optional["BacktestResponse"]:
+    """2-year backtest for a ticker, cached 24h so this only costs an extra
+    data fetch once per ticker per day, not on every analyze() call."""
+    cached = _TRACK_RECORD_CACHE.get(ticker)
+    if cached and time.time() - cached[0] < _TRACK_RECORD_TTL_SECONDS:
+        return cached[1]
+    try:
+        result = run_backtest(ticker, period="2y")
+    except Exception as e:
+        logger.info(f"Track record skipped for {ticker}: {e}")
+        return None
+    _TRACK_RECORD_CACHE[ticker] = (time.time(), result)
+    return result
+
+
+def apply_track_record(technical: TechnicalAnalysis, ticker: str) -> TechnicalAnalysis:
+    if technical.signal not in ("BUY", "SELL"):
+        return technical
+
+    bt = get_ticker_track_record(ticker)
+    if bt is None:
+        return technical  # fetch/backtest failed — fail silent, live signal is unaffected
+
+    side = bt.buy if technical.signal == "BUY" else bt.sell
+    ten = next((h for h in side.horizons if h.days == 10), None)
+
+    if side.event_count < TRACK_RECORD_MIN_EVENTS or ten is None or ten.net_edge is None:
+        technical.track_record_events = side.event_count
+        technical.track_record_note = (
+            f"Only {side.event_count} past {technical.signal} signals on this stock — too few "
+            "to check a track record yet. Conviction unaffected."
+        )
+        return technical
+
+    edge = ten.net_edge
+    technical.track_record_edge = edge
+    technical.track_record_events = side.event_count
+    levels = ["Low", "Moderate", "High"]
+
+    if edge >= TRACK_RECORD_STRONG_EDGE:
+        if technical.conviction in levels:
+            technical.conviction = levels[min(levels.index(technical.conviction) + 1, 2)]
+        technical.track_record_note = (
+            f"This stock's own {technical.signal} signals have beaten random days by "
+            f"{edge:+.2f}% over the following two weeks, across {side.event_count} past "
+            "signals — a track record that supports this call. Conviction raised accordingly."
+        )
+    elif edge <= -TRACK_RECORD_STRONG_EDGE:
+        if technical.conviction in levels:
+            technical.conviction = levels[max(levels.index(technical.conviction) - 1, 0)]
+        technical.track_record_note = (
+            f"Worth knowing: this stock's own {technical.signal} signals have historically "
+            f"UNDERPERFORMED random days by {abs(edge):.2f}% over the following two weeks, "
+            f"across {side.event_count} past signals. Conviction lowered accordingly — the "
+            "signal itself hasn't changed, but its track record here argues for caution."
+        )
+    else:
+        technical.track_record_note = (
+            f"This stock's own {technical.signal} signals have shown a modest "
+            f"{edge:+.2f}% edge over {side.event_count} past signals — not a strong enough "
+            "pattern either way to move conviction."
+        )
+    return technical
 
 
 def apply_earnings_proximity(
@@ -1428,8 +1519,16 @@ def analyze(ticker: str):
         if data_quality.reliability == "Poor":
             technical.conviction = "Low"
             technical.reasoning += " Conviction capped at Low: this listing trades too thinly for the indicators to be dependable."
-        elif data_quality.reliability == "Fair" and technical.conviction == "High":
-            technical.conviction = "Moderate"
+            # Skip track-record too: a backtest built on this same thin,
+            # unreliable data wouldn't be trustworthy either.
+        else:
+            if data_quality.reliability == "Fair" and technical.conviction == "High":
+                technical.conviction = "Moderate"
+            technical = apply_track_record(technical, ticker)
+    else:
+        # Signal was substituted from a reliable underlying — that
+        # underlying's own track record is the relevant one to check.
+        technical = apply_track_record(technical, underlying["ticker"])
 
     regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
     earnings = fetch_earnings(stock)
@@ -1938,7 +2037,20 @@ def backtest(ticker: str, period: str = "2y"):
     """
     if period not in ("1y", "2y", "5y"):
         period = "2y"
-    return run_backtest(ticker, period)
+    ticker_clean = ticker.strip().upper()
+
+    # Shares a cache with the live signal's track-record check (same period,
+    # same computation) — if this ticker was just analyzed, this is instant
+    # instead of redundantly refetching and recomputing the same backtest.
+    if period == "2y":
+        cached = _TRACK_RECORD_CACHE.get(ticker_clean)
+        if cached and time.time() - cached[0] < _TRACK_RECORD_TTL_SECONDS:
+            return cached[1]
+
+    result = run_backtest(ticker, period)
+    if period == "2y":
+        _TRACK_RECORD_CACHE[ticker_clean] = (time.time(), result)
+    return result
 
 
 # ===========================================================================
