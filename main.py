@@ -1589,7 +1589,7 @@ def analyze(ticker: str):
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
 
-    headlines = fetch_headlines(stock, limit=5)
+    headlines = fetch_headlines(stock, limit=7)
     sentiment = analyze_sentiment(headlines)
 
     response = AnalysisResponse(
