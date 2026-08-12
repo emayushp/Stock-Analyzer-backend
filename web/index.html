@@ -204,6 +204,15 @@ function Readout({t}) {
       <div><div className="lbl">MACD</div><b>{t.macd_histogram ?? "—"}</b></div>
       <div><div className="lbl">VOL</div><b>{t.volume_ratio != null ? t.volume_ratio+"×" : "—"}</b></div>
     </div>
+    {t.track_record_note && <div style={{marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="lbl">Track Record</div>
+        {t.track_record_edge != null && <b className="num" style={{fontSize:13,
+          color:t.track_record_edge>0?"var(--green)":"var(--red)"}}>
+          {t.track_record_edge>0?"+":""}{t.track_record_edge}%</b>}
+      </div>
+      <p className="mut" style={{marginTop:6,lineHeight:1.5}}>{t.track_record_note}</p>
+    </div>}
   </div>;
 }
 
