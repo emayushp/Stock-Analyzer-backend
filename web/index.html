@@ -386,7 +386,50 @@ function Backtest({ticker}) {
             </>}
           </div>
         </>}
+
+        <ConvictionTest ticker={ticker}/>
       </div>
+    </>}
+  </div>;
+}
+
+/* ===== Conviction-level backtest — does the High/Moderate/Low label mean anything? ===== */
+function ConvictionTest({ticker}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  useEffect(()=>{ setD(null); setErr(null); },[ticker]);
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { setD(await api(`/api/backtest/${encodeURIComponent(ticker)}/conviction?period=5y`)); }
+    catch(e){ setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const buckets = (list,label) => <div style={{marginTop:14}}>
+    <div className="lbl" style={{marginBottom:7}}>{label}</div>
+    {list.map(b=>{
+      const thin = b.event_count < 8;
+      const c = thin?"var(--faint)":b.edge_10d==null?"var(--faint)":b.edge_10d>0.5?"var(--green)":b.edge_10d>0?"var(--amber)":"var(--red)";
+      return <div className="prow" key={b.conviction}>
+        <div className="dot" style={{background:c}}/>
+        <div className="mut">{b.plain}</div>
+      </div>;
+    })}
+  </div>;
+
+  return <div style={{marginTop:18,paddingTop:16,borderTop:"1px solid var(--border)"}}>
+    {!d && !busy && !err && <>
+      <p className="mut">The app labels every signal High, Moderate, or Low conviction based on
+        volume. Does that label actually mean anything, or is it decorative? This checks whether
+        High-conviction BUY signals have actually done better than Low-conviction ones on {ticker}.</p>
+      <button className="btn ghost" style={{marginTop:12,width:"100%"}} onClick={run}>Test conviction levels</button>
+    </>}
+    {busy && <Spin t="Splitting signals by conviction…"/>}
+    {err && <p className="mut">{err}</p>}
+    {d && !busy && <>
+      {buckets(d.buy_buckets,"BUY signals, by conviction")}
+      {buckets(d.sell_buckets,"SELL signals, by conviction")}
+      <div className="expbody">{d.verdict}</div>
+      <Exp text={d.caveats}/>
     </>}
   </div>;
 }
