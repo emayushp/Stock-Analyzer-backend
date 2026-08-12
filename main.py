@@ -1094,15 +1094,13 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
 
     for t in tickers:
         try:
-            # Multi-ticker downloads come back with a per-ticker column level;
-            # a single-ticker download comes back flat.
-            if len(tickers) == 1:
-                df = raw
-            else:
-                if t not in raw.columns.get_level_values(0):
-                    results[t] = {"error": "No data found for this ticker."}
-                    continue
-                df = raw[t]
+            # yf.download() always returns a per-ticker column level (a
+            # MultiIndex keyed by ticker), even when only one ticker was
+            # requested, since multi_level_index isn't set to False above.
+            if t not in raw.columns.get_level_values(0):
+                results[t] = {"error": "No data found for this ticker."}
+                continue
+            df = raw[t]
 
             df = df.dropna(how="all")
             if df.empty or len(df) < 30:
@@ -1329,7 +1327,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
 
         change_pct = r.get("change_pct")
         day_pl_native = None
-        if change_pct is not None and price:
+        if change_pct is not None and change_pct > -100 and price:
             prev_close = price / (1 + change_pct / 100)
             day_pl_native = round(h.shares * (price - prev_close), 2)
             total_day_pl_cad += day_pl_native * fx
@@ -3121,7 +3119,9 @@ def quotes(tickers: str = ""):
                               group_by="ticker", progress=False, threads=True)
             for s in fresh_needed:
                 try:
-                    series = raw[s]["Close"] if len(fresh_needed) > 1 else raw["Close"]
+                    # yf.download() always returns a per-ticker column level
+                    # (a MultiIndex keyed by ticker), even for a single ticker.
+                    series = raw[s]["Close"]
                     price = round(float(series.dropna().iloc[-1]), 2)
                     _QUOTES_CACHE[s] = (now, price)
                     results.append(Quote(
