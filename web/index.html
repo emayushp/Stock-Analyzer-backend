@@ -910,19 +910,33 @@ const CTag = ({t}) => <span className="mini" style={{color:"var(--muted)",border
   background:"var(--border)",letterSpacing:".5px"}}>{isCad(t)?"CAD":"US"}</span>;
 
 function Brief({state, dispatch}) {
-  const {holdings, watchlist} = state;
+  const {holdings, watchlist, scanTickers, setScanTickers} = state;
   const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
   const [refreshing,setRefreshing] = useState(false);
+  const [showAllBuys,setShowAllBuys] = useState(false);
+  const [showAllSells,setShowAllSells] = useState(false);
+  const [addingScan,setAddingScan] = useState(false);
+  const [scanInput,setScanInput] = useState("");
 
   const load = useCallback(async (force)=>{
     force ? setRefreshing(true) : setBusy(true); setErr(null);
     try {
       setD(await api(`/api/digest${force?"?force=true":""}`,{method:"POST",
-        headers:{"Content-Type":"application/json"},body:JSON.stringify({holdings,watchlist})}));
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({holdings,watchlist,extra_scan_tickers:scanTickers})}));
+      setShowAllBuys(false); setShowAllSells(false);
     } catch(e){ setErr(e.message); } finally { setBusy(false); setRefreshing(false); }
-  },[holdings,watchlist]);
+  },[holdings,watchlist,scanTickers]);
 
-  useEffect(()=>{ load(); },[]);
+  useEffect(()=>{ load(); /* eslint-disable-next-line */ },[scanTickers]);
+
+  const addScan = () => {
+    const t = scanInput.trim().toUpperCase();
+    if (!t) return;
+    if (!scanTickers.includes(t)) setScanTickers([...scanTickers, t]);
+    setScanInput(""); setAddingScan(false);
+  };
+  const removeScan = t => setScanTickers(scanTickers.filter(x=>x!==t));
 
   const list = (rows,title,extra) => rows?.length>0 && <div className="card">
     <h2>{title}{extra}</h2>
@@ -943,6 +957,13 @@ function Brief({state, dispatch}) {
     </div>)}
   </div>;
 
+  const signalRow = h => <div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+    <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
+      <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · {h.conviction}</div></div>
+    <div style={{textAlign:"right"}}><div className="num" style={{fontWeight:700}}>{h.price}</div>
+      <div className="num" style={{fontSize:11.5,color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div></div>
+  </div>;
+
   return <>
     <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
       <div style={{flex:1}}><h1>Morning Brief</h1><div className="tag">Portfolio · watchlist · opportunities</div></div>
@@ -959,17 +980,44 @@ function Brief({state, dispatch}) {
         ticker:h.ticker,price:h.current_price,change_pct:h.unrealized_pl_pct,rsi:h.rsi,
         volume_ratio:h.volume_ratio,signal:h.signal,conviction:h.conviction})),"Your Holdings")}
       {list(d.watchlist_signals,"Your Watchlist")}
+
+      <div className="card">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h2 style={{marginBottom:0}}>Custom Scan List</h2>
+          <button className="link" onClick={()=>setAddingScan(!addingScan)}>{addingScan?"Cancel":"+ Add ticker"}</button>
+        </div>
+        <p className="mut" style={{marginTop:6}}>Tickers here get scanned for BUY/SELL alongside the
+          built-in list, and show up in Buy/Bearish Signals below when they qualify.</p>
+        {addingScan && <div style={{display:"flex",gap:8,marginTop:12}}>
+          <input placeholder="e.g. PLTR" value={scanInput} style={{flex:1}}
+            onChange={e=>setScanInput(e.target.value.toUpperCase())}
+            onKeyDown={e=>e.key==="Enter"&&addScan()}/>
+          <button className="btn" onClick={addScan}>Add</button>
+        </div>}
+        {scanTickers.length>0 && <div className="chips" style={{marginTop:12,marginBottom:0}}>
+          {scanTickers.map(t=><div key={t} className="chip" onClick={()=>removeScan(t)}>{t} ✕</div>)}
+        </div>}
+      </div>
+
       <div className="card">
         <h2>Buy Signals <button className="link" onClick={()=>load(true)}>{refreshing?"···":"↻"}</button></h2>
         {d.opportunities.length===0 ? <p className="mut">No buy signals in the scanned universe right now.</p>
-          : d.opportunities.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
-              <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · {h.conviction}</div></div>
-            <div style={{textAlign:"right"}}><div className="num" style={{fontWeight:700}}>{h.price}</div>
-              <div className="num" style={{fontSize:11.5,color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div></div>
-          </div>)}
+          : (showAllBuys ? d.opportunities : d.opportunities.slice(0,10)).map(signalRow)}
+        {d.opportunities.length>10 && <button className="link" style={{marginTop:10}}
+          onClick={()=>setShowAllBuys(!showAllBuys)}>
+          {showAllBuys ? "Show top 10 only" : `Show all scanned (${d.opportunities.length})`}
+        </button>}
       </div>
-      {list(d.warnings,"Bearish Signals")}
+
+      {d.warnings.length>0 && <div className="card">
+        <h2>Bearish Signals <button className="link" onClick={()=>load(true)}>{refreshing?"···":"↻"}</button></h2>
+        {(showAllSells ? d.warnings : d.warnings.slice(0,10)).map(signalRow)}
+        {d.warnings.length>10 && <button className="link" style={{marginTop:10}}
+          onClick={()=>setShowAllSells(!showAllSells)}>
+          {showAllSells ? "Show top 10 only" : `Show all scanned (${d.warnings.length})`}
+        </button>}
+      </div>}
+
       {(d.under20_buys?.length>0 || d.under20_avoid?.length>0) && <div className="card">
         <h2>Canadian Stocks Under $20</h2>
         {d.under20_buys?.length>0 && <><div className="lbl" style={{marginBottom:4}}>Worth a look</div>
@@ -995,31 +1043,128 @@ const agree = (sig,act) => act==="held" ? (sig==="HOLD"?"followed":"ignored")
 const daysSince = iso => Math.floor((Date.now()-new Date(iso).getTime())/864e5);
 const MIN_DAYS = 10;
 
+// Backward compat: old entries were flat {action,price,note,...}. New
+// entries carry a history array so a position can be followed over time.
+// Normalizing on read means old data upgrades itself automatically.
+const normalizeEntry = e => e.history ? e : {
+  id: e.id, ticker: e.ticker,
+  history: [{action:e.action, price:e.price, at:e.logged_at, note:e.note||"",
+    app_signal:e.app_signal, app_conviction:e.app_conviction}],
+};
+
+// If a "bought" was later followed by a "sold" in the same entry's history,
+// the return is REALIZED — known for certain — rather than estimated from
+// the current live price.
+const outcomeReturn = (entry, currentPrice) => {
+  const first = entry.history[0];
+  const laterSale = entry.history.find((h,i)=>i>0 && h.action==="sold");
+  if (first.action==="bought" && laterSale) {
+    return {value:(laterSale.price/first.price-1)*100, realized:true};
+  }
+  if (!currentPrice || !first.price) return {value:null, realized:false};
+  const raw = (currentPrice/first.price-1)*100;
+  if (first.action==="sold") return {value:-raw, realized:false};
+  if (first.action==="held") return {value:null, realized:false};
+  return {value:raw, realized:false};
+};
+
+function HistoryRow({item, onEditNote}) {
+  const [editing,setEditing] = useState(false);
+  const [draft,setDraft] = useState(item.note||"");
+  const color = SIG[item.app_signal] || "var(--muted)";
+  return <div style={{borderTop:"1px solid var(--border)",paddingTop:10,paddingBottom:10}}>
+    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+      <span className="mini" style={{color,borderColor:color+"66",background:color+"1F"}}>APP: {item.app_signal||"—"}</span>
+      <span className="mut" style={{fontSize:11.5}}>{item.action.toUpperCase()} @ {item.price} · {new Date(item.at).toLocaleDateString()}</span>
+    </div>
+    {editing ? <div style={{marginTop:8}}>
+      <textarea rows="3" value={draft} onChange={e=>setDraft(e.target.value)} autoFocus/>
+      <div style={{display:"flex",justifyContent:"flex-end",gap:16,marginTop:8}}>
+        <button className="link" onClick={()=>{setDraft(item.note||""); setEditing(false);}}>Cancel</button>
+        <button className="link" onClick={()=>{onEditNote(draft.trim()); setEditing(false);}}>Save</button>
+      </div>
+    </div> : <div style={{marginTop:8,cursor:"pointer"}} onClick={()=>setEditing(true)}>
+      {item.note ? <p style={{fontSize:12.5,lineHeight:1.55}}>{item.note}</p>
+        : <p className="mut" style={{fontSize:11.5}}>No notes — tap to add some</p>}
+    </div>}
+  </div>;
+}
+
+function AddActionModal({visible, ticker, prefillPrice, onSave, onClose}) {
+  const [action,setAction] = useState(null);
+  const [price,setPrice] = useState("");
+  const [note,setNote] = useState("");
+  useEffect(()=>{
+    if (visible) { setAction(null); setPrice(prefillPrice!=null?String(prefillPrice):""); setNote(""); }
+  },[visible,prefillPrice]);
+  if (!visible) return null;
+
+  const save = () => {
+    const p = parseFloat(price);
+    if (!action) return alert("Pick what you did.");
+    if (!p || p<=0) return alert("Enter the price at the time of this action.");
+    onSave({action, price:p, note:note.trim(), at:new Date().toISOString()});
+  };
+
+  return <div className="modal" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="box">
+      <h2>Add action — {ticker}<button className="link" onClick={onClose}>✕</button></h2>
+      <div className="lbl" style={{margin:"12px 0 8px"}}>What did you do?</div>
+      {[["bought","Bought more","Added to the position"],
+        ["sold","Sold","Closed or trimmed the position"],
+        ["held","Checked in, held","Reviewed, made no change"]].map(([k,l,h])=>
+        <div key={k} className={"opt"+(action===k?" on":"")} onClick={()=>setAction(k)}>
+          <b style={action===k?{color:"var(--accent)"}:{}}>{l}</b><span>{h}</span></div>)}
+      <div className="lbl" style={{margin:"16px 0 8px"}}>Price at the time</div>
+      <input value={price} onChange={e=>setPrice(e.target.value)}/>
+      <div className="lbl" style={{margin:"16px 0 8px"}}>Notes</div>
+      <textarea rows="3" placeholder="Why this, why now?" value={note} onChange={e=>setNote(e.target.value)}/>
+      <button className="btn" style={{width:"100%",marginTop:14}} onClick={save}>Add to entry</button>
+    </div>
+  </div>;
+}
+
 function Journal({state, dispatch}) {
   const {journal} = state;
+  const entries = journal.map(normalizeEntry);
   const [prices,setPrices] = useState({});
+  const [addActionFor,setAddActionFor] = useState(null);
+
   useEffect(()=>{
-    if (!journal.length) return;
-    const ts = [...new Set(journal.map(e=>e.ticker))].join(",");
+    if (!entries.length) return;
+    const ts = [...new Set(entries.map(e=>e.ticker))].join(",");
     api(`/api/quotes?tickers=${ts}`).then(j=>{
       const m = {}; j.quotes.forEach(q=>{ if(q.price) m[q.ticker]=q.price; }); setPrices(m);
     }).catch(()=>{});
   },[journal.length]);
 
-  const ret = e => { const p = prices[e.ticker];
-    if (!p||!e.price) return null;
-    const raw = (p/e.price-1)*100;
-    return e.action==="sold" ? -raw : e.action==="held" ? null : raw; };
+  const appendAction = (id, action) => {
+    dispatch({type:"journal", v: entries.map(e=>e.id===id?{...e,history:[...e.history,action]}:e)});
+  };
+  const editNote = (id, idx, note) => {
+    dispatch({type:"journal", v: entries.map(e=>{
+      if (e.id!==id) return e;
+      return {...e, history: e.history.map((h,i)=>i===idx?{...h,note}:h)};
+    })});
+  };
+  const deleteEntry = id => {
+    if (!confirm("Remove this entry?")) return;
+    dispatch({type:"journal", v: entries.filter(e=>e.id!==id)});
+  };
 
-  const scored = journal.map(e=>({e,d:daysSince(e.logged_at),r:ret(e)}))
-    .filter(x=>x.r!=null && x.d>=MIN_DAYS);
-  const fol = scored.filter(x=>agree(x.e.app_signal,x.e.action)==="followed");
-  const ovr = scored.filter(x=>agree(x.e.app_signal,x.e.action)==="overrode");
-  const avg = a => a.length ? a.reduce((s,x)=>s+x.r,0)/a.length : null;
+  const scored = entries.map(e=>{
+    const first = e.history[0];
+    const outcome = outcomeReturn(e, prices[e.ticker]);
+    return {e, first, d:daysSince(first.at), ...outcome};
+  }).filter(x=>x.value!=null && (x.realized || x.d>=MIN_DAYS));
+
+  const fol = scored.filter(x=>agree(x.first.app_signal,x.first.action)==="followed");
+  const ovr = scored.filter(x=>agree(x.first.app_signal,x.first.action)==="overrode");
+  const avg = a => a.length ? a.reduce((s,x)=>s+x.value,0)/a.length : null;
   const fa = avg(fol), oa = avg(ovr), few = fol.length<5||ovr.length<5;
 
   let verdict;
-  if (!scored.length) verdict = `No decisions are old enough to judge yet — entries need ${MIN_DAYS}+ days before the outcome means anything. Judging sooner is measuring noise.`;
+  if (!scored.length) verdict = `No decisions are old enough to judge yet — entries need ${MIN_DAYS}+ days before the outcome means anything (unless already closed out with a sale, which counts immediately).`;
   else if (few) verdict = `Too few decisions to draw conclusions (${fol.length} followed, ${ovr.length} overrode). You'd want at least 5 of each, and really 20+, before reading anything into the difference.`;
   else if (oa>fa+1) verdict = `Your overrides have outperformed the app by ${(oa-fa).toFixed(1)}% on average. Your judgement is adding something — though check whether those clustered in one lucky stretch.`;
   else if (fa>oa+1) verdict = `Following the app has outperformed your overrides by ${(fa-oa).toFixed(1)}%. Worth reading back through why you overrode — there may be a correctable pattern.`;
@@ -1027,7 +1172,7 @@ function Journal({state, dispatch}) {
 
   return <>
     <div style={{margin:"22px 0 16px"}}><h1>Journal</h1><div className="tag">What you decided · how it turned out</div></div>
-    {!journal.length ? <div className="center"><h3>No entries yet</h3>
+    {!entries.length ? <div className="center"><h3>No entries yet</h3>
       <p>When you analyze a stock, use "Log what you decided" to record what you did and why.
         Over time this shows whether your instincts beat the app's signals — the one thing almost
         no investor actually measures.</p></div> : <>
@@ -1041,38 +1186,51 @@ function Journal({state, dispatch}) {
           <div className="rule"/>
         </>}
         <p className="plain">{verdict}</p>
-        <Exp text={`How this is scored. The app records what it recommended and what you did as separate facts, then works out whether you agreed — rather than asking afterwards, which invites flattering yourself. Returns run from the price when you logged the decision to today, flipped for sells. Entries younger than ${MIN_DAYS} days are excluded because short-horizon outcomes are mostly noise. Do-nothing entries aren't scored.`}/>
+        <Exp text={`How this is scored. The app records what it recommended and what you did as separate facts, then works out whether you agreed — rather than asking afterwards, which invites flattering yourself. If an entry has been closed out with a later sale, that REALIZED return is used and counts immediately; otherwise it compares the logged price to today's, flipped for sells, and waits ${MIN_DAYS} days since short-horizon outcomes are mostly noise. Do-nothing entries aren't scored.`}/>
       </div>
-      {[...journal].sort((a,b)=>new Date(b.logged_at)-new Date(a.logged_at)).map(e=>{
-        const d = daysSince(e.logged_at), r = ret(e), early = d<MIN_DAYS;
-        const ag = agree(e.app_signal,e.action);
+      {[...entries].sort((a,b)=>new Date(b.history[0].at)-new Date(a.history[0].at)).map(e=>{
+        const first = e.history[0];
+        const d = daysSince(first.at);
+        const outcome = outcomeReturn(e, prices[e.ticker]);
+        const early = !outcome.realized && d<MIN_DAYS;
+        const ag = agree(first.app_signal, first.action);
         const ac = ag==="followed"?"var(--accent)":ag==="overrode"?"var(--amber)":"var(--faint)";
+        const closed = e.history.some(h=>h.action==="sold");
         return <div className="card" key={e.id}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
             <div><b className="num" style={{fontSize:15}}>{e.ticker}</b>
-              <div className="mut" style={{fontSize:11.5}}>{new Date(e.logged_at).toLocaleDateString()} · {d}d ago</div></div>
-            {r!=null && !early && <div className="num" style={{fontWeight:700,fontSize:15,
-              color:r>=0?"var(--green)":"var(--red)"}}>{r>=0?"+":""}{r.toFixed(1)}%</div>}
+              <div className="mut" style={{fontSize:11.5}}>{new Date(first.at).toLocaleDateString()} · {d}d ago{closed?" · closed":""}</div></div>
+            {outcome.value!=null && !early && <div style={{textAlign:"right"}}>
+              <div className="num" style={{fontWeight:700,fontSize:15,
+                color:outcome.value>=0?"var(--green)":"var(--red)"}}>{outcome.value>=0?"+":""}{outcome.value.toFixed(1)}%</div>
+              {outcome.realized && <div className="mut" style={{fontSize:10.5}}>realized</div>}
+            </div>}
           </div>
-          <div style={{display:"flex",gap:8,margin:"10px 0"}}>
-            <span className="mini" style={{color:SIG[e.app_signal],borderColor:SIG[e.app_signal]+"66",background:SIG[e.app_signal]+"1F"}}>APP: {e.app_signal}</span>
-            <span className="mini" style={{color:ac,borderColor:ac+"66",background:ac+"1F"}}>YOU: {e.action.toUpperCase()}</span>
+          <div style={{margin:"10px 0"}}>
+            <span className="mini" style={{color:ac,borderColor:ac+"66",background:ac+"1F"}}>
+              {ag==="followed"?"FOLLOWED THE APP":ag==="overrode"?"WENT AGAINST THE APP":"NO ACTION ON SIGNAL"}</span>
           </div>
-          <Row l="Price when logged" v={e.price}/>
-          {prices[e.ticker] && <Row l="Price now" v={prices[e.ticker]}/>}
+          {prices[e.ticker] && !closed && <Row l="Price now" v={prices[e.ticker]}/>}
           {early && <p className="note">Too early to judge — needs {MIN_DAYS-d} more day{MIN_DAYS-d===1?"":"s"}.</p>}
-          {e.action==="held" && <p className="note">Not scored — no position was taken.</p>}
-          {e.note && <div style={{background:"var(--bg)",borderRadius:8,padding:11,marginTop:12}}>
-            <div className="lbl" style={{marginBottom:5}}>Your reasoning</div>
-            <p style={{fontSize:12.5,lineHeight:1.55}}>{e.note}</p></div>}
+          {first.action==="held" && e.history.length===1 && <p className="note">Not scored — no position was taken.</p>}
+
+          <div className="rule"/>
+          <div className="lbl" style={{marginBottom:4}}>Timeline</div>
+          {e.history.map((item,i)=><HistoryRow key={i} item={item} onEditNote={note=>editNote(e.id,i,note)}/>)}
+
           <div style={{display:"flex",justifyContent:"space-between",marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)"}}>
-            <span className="mut" style={{fontSize:11.5}}>
-              {ag==="followed"?"Followed the app":ag==="overrode"?"Went against the app":"No action on signal"}</span>
-            <button className="link" style={{color:"var(--red)"}}
-              onClick={()=>confirm("Remove this entry?")&&dispatch({type:"journal", v:journal.filter(x=>x.id!==e.id)})}>Delete</button>
+            <button className="link" onClick={()=>setAddActionFor(e)}>+ Add action</button>
+            <button className="link" style={{color:"var(--red)"}} onClick={()=>deleteEntry(e.id)}>Delete entry</button>
           </div>
         </div>;
       })}
+      <AddActionModal
+        visible={!!addActionFor}
+        ticker={addActionFor?.ticker}
+        prefillPrice={addActionFor ? prices[addActionFor.ticker] : null}
+        onSave={action => { appendAction(addActionFor.id, action); setAddActionFor(null); }}
+        onClose={()=>setAddActionFor(null)}
+      />
     </>}
   </>;
 }
@@ -1104,8 +1262,9 @@ function LogModal({data, onSave, onClose}) {
         value={note} onChange={e=>setNote(e.target.value)}/>
       <button className="btn" style={{width:"100%",marginTop:14}} onClick={()=>{
         if (!act) return alert("Pick what you actually did.");
-        onSave({id:`${data.ticker}-${Date.now()}`,ticker:data.ticker,logged_at:new Date().toISOString(),
-          app_signal:t.signal,app_conviction:t.conviction,price:data.current_price,action:act,note:note.trim()});
+        onSave({id:`${data.ticker}-${Date.now()}`,ticker:data.ticker,
+          history:[{action:act, price:data.current_price, note:note.trim(),
+            at:new Date().toISOString(), app_signal:t.signal, app_conviction:t.conviction}]});
       }}>Save to journal</button>
     </div>
   </div>;
@@ -1117,11 +1276,16 @@ function App() {
   const [q,setQ] = useState("");
   const [data,setData] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
   const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
+  const [scanTickers,setScanTickers] = useState(()=>store.get("ma_scan_tickers",[]));
   const [holdings,setHoldings] = useState(()=>store.get("ma_portfolio",[]));
   const [cash,setCash] = useState(()=>store.get("ma_cash",0));
   const [journal,setJournal] = useState(()=>store.get("ma_journal",[]));
   const [portfolioValue,setPV] = useState(0);
   const [logOpen,setLogOpen] = useState(false);
+
+  const setScanTickersPersist = useCallback(list => {
+    setScanTickers(list); store.set("ma_scan_tickers", list);
+  }, []);
 
   const analyze = useCallback(async sym => {
     const s = (sym||"").trim().toUpperCase();
@@ -1145,7 +1309,8 @@ function App() {
     }
   },[watchlist,analyze]);
 
-  const state = {q,data,busy,err,watchlist,holdings,cash,journal,portfolioValue};
+  const state = {q,data,busy,err,watchlist,holdings,cash,journal,portfolioValue,
+    scanTickers,setScanTickers:setScanTickersPersist};
 
   return <>
     <header><div className="hdr">
