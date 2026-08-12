@@ -905,6 +905,10 @@ function Portfolio({state, dispatch}) {
 }
 
 /* ===== Brief ===== */
+const isCad = t => /\.(TO|V|CN)$/i.test(t||"");
+const CTag = ({t}) => <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",
+  background:"var(--border)",letterSpacing:".5px"}}>{isCad(t)?"CAD":"US"}</span>;
+
 function Brief({state, dispatch}) {
   const {holdings, watchlist} = state;
   const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
@@ -925,7 +929,7 @@ function Brief({state, dispatch}) {
     {rows.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
       <div style={{flex:1}}>
         <div style={{display:"flex",alignItems:"center",gap:9}}>
-          <b className="num">{h.ticker}</b>
+          <b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
           <span className="mini" style={{color:SIG[h.signal],borderColor:SIG[h.signal]+"66",background:SIG[h.signal]+"1F"}}>{h.signal}</span>
           <span style={{fontSize:10,color:"var(--faint)",fontWeight:600}}>{h.conviction}</span>
         </div>
@@ -959,7 +963,7 @@ function Brief({state, dispatch}) {
         <h2>Buy Signals <button className="link" onClick={()=>load(true)}>{refreshing?"···":"↻"}</button></h2>
         {d.opportunities.length===0 ? <p className="mut">No buy signals in the scanned universe right now.</p>
           : d.opportunities.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
               <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · {h.conviction}</div></div>
             <div style={{textAlign:"right"}}><div className="num" style={{fontWeight:700}}>{h.price}</div>
               <div className="num" style={{fontSize:11.5,color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div></div>
@@ -970,11 +974,11 @@ function Brief({state, dispatch}) {
         <h2>Canadian Stocks Under $20</h2>
         {d.under20_buys?.length>0 && <><div className="lbl" style={{marginBottom:4}}>Worth a look</div>
           {d.under20_buys.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
             <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
         {d.under20_avoid?.length>0 && <><div className="lbl" style={{margin:"12px 0 4px"}}>Avoid for now</div>
           {d.under20_avoid.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
             <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
         <p className="note">A fixed list of TSX/TSX-V names commonly under CAD $20 — not the whole exchange.
           "Avoid" means negative momentum now, not a judgment on the business.</p>
