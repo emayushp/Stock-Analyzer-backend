@@ -892,16 +892,24 @@ function Portfolio({state, dispatch}) {
     e.target.value = "";
   };
 
+  // Matches ticker AND account, not ticker alone — the same ticker can
+  // legitimately appear once per account (e.g. NVDA held in both an FHSA
+  // and a TFSA after a CSV import), and ticker-only matching would sell
+  // from or delete both at once.
+  const sameHolding = (h, ticker, account) => h.ticker===ticker && (h.account||null)===(account||null);
+
   const save = () => {
     const t = f.ticker.trim().toUpperCase(), sh = parseFloat(f.shares), co = parseFloat(f.cost);
     if (!t||!sh||!co||sh<=0||co<=0) return alert("Enter a ticker, share count, and average price paid.");
     const total = sh*co;
     if (f.deduct && total > cash) return alert(`This costs ${fmt(total)} but you only have ${fmt(cash)} in cash. Add cash first, or turn off "deduct from cash".`);
-    const ex = holdings.find(h=>h.ticker===t);
+    // Only merges with another account-less (manually entered) holding of
+    // the same ticker — not into an imported, account-tagged position.
+    const ex = holdings.find(h=>h.ticker===t && !h.account);
     let next;
     if (ex) { // merge with weighted-average cost rather than overwriting
       const cs = ex.shares+sh;
-      next = holdings.map(h=>h.ticker===t?{ticker:t,shares:cs,
+      next = holdings.map(h=>h===ex?{ticker:t,shares:cs,
         cost_basis:Math.round(((ex.shares*ex.cost_basis+sh*co)/cs)*100)/100}:h);
     } else next = [...holdings,{ticker:t,shares:sh,cost_basis:co}];
     dispatch({type:"holdings", v:next});
@@ -911,17 +919,17 @@ function Portfolio({state, dispatch}) {
 
   const doSell = () => {
     const sh = parseFloat(sell.shares), pr = parseFloat(sell.price);
-    const h = holdings.find(x=>x.ticker===sell.ticker);
+    const h = holdings.find(x=>sameHolding(x, sell.ticker, sell.account));
     if (!h||!sh||!pr||sh<=0||sh>h.shares||pr<=0) return alert(`Enter shares (up to ${h?.shares}) and a sale price.`);
     const rem = h.shares-sh;
-    const next = rem>0.0001 ? holdings.map(x=>x.ticker===sell.ticker?{...x,shares:rem}:x)
-                            : holdings.filter(x=>x.ticker!==sell.ticker);
+    const next = rem>0.0001 ? holdings.map(x=>sameHolding(x, sell.ticker, sell.account)?{...x,shares:rem}:x)
+                            : holdings.filter(x=>!sameHolding(x, sell.ticker, sell.account));
     dispatch({type:"holdings", v:next}); dispatch({type:"cash", v:cash+sh*pr});
     setSell(null); load(next);
   };
 
-  const del = t => { if(!confirm(`Remove ${t}? This is for fixing a wrong entry — it won't change your cash. Use Sell to record a real sale.`))return;
-    const next = holdings.filter(h=>h.ticker!==t); dispatch({type:"holdings", v:next}); load(next); };
+  const del = (t, account) => { if(!confirm(`Remove ${t}${account?` (${account})`:""}? This is for fixing a wrong entry — it won't change your cash. Use Sell to record a real sale.`))return;
+    const next = holdings.filter(h=>!sameHolding(h, t, account)); dispatch({type:"holdings", v:next}); load(next); };
 
   const cashOp = op => {
     const a = parseFloat(amt);
@@ -1031,17 +1039,18 @@ function Portfolio({state, dispatch}) {
         const vp = filter==="today"?h.day_pl_pct:h.unrealized_pl_pct;
         const c = v==null?"var(--muted)":v>=0?"var(--green)":"var(--red)";
         const sc = SIG[h.signal]||"var(--muted)";
-        return <div className="card" key={h.ticker}>
+        const hKey = `${h.ticker}__${h.account||""}`;
+        return <div className="card" key={hKey}>
           <div style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
-               onClick={()=>setOpen({...open,[h.ticker]:!open[h.ticker]})}>
+               onClick={()=>setOpen({...open,[hKey]:!open[hKey]})}>
             <div style={{flex:1}}><b className="num" style={{fontSize:15}}>{h.ticker}</b>
-              <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}</div></div>
+              <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}{h.account?` · ${h.account}`:""}</div></div>
             {v!=null && <div style={{textAlign:"right"}}>
               <div className="num" style={{fontWeight:700,color:c}}>{v>=0?"+":""}{fmt(v)}</div>
               <div className="num" style={{fontSize:11,color:c}}>{vp>=0?"+":""}{vp}%</div></div>}
-            <span style={{color:"var(--faint)",fontSize:11}}>{open[h.ticker]?"▲":"▼"}</span>
+            <span style={{color:"var(--faint)",fontSize:11}}>{open[hKey]?"▲":"▼"}</span>
           </div>
-          {open[h.ticker] && <div style={{marginTop:10}}>
+          {open[hKey] && <div style={{marginTop:10}}>
             <div className="rule"/>
             {h.error ? <p className="mut">{h.error}</p> : <>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
@@ -1060,8 +1069,8 @@ function Portfolio({state, dispatch}) {
               <button className="link" onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>Full analysis →</button>
               <div style={{display:"flex",gap:16}}>
                 {!h.error && <button className="link" style={{color:"var(--amber)"}}
-                  onClick={()=>setSell({ticker:h.ticker,shares:String(h.shares),price:String(h.current_price||"")})}>Sell</button>}
-                <button className="link" style={{color:"var(--red)"}} onClick={()=>del(h.ticker)}>Delete</button>
+                  onClick={()=>setSell({ticker:h.ticker,account:h.account,shares:String(h.shares),price:String(h.current_price||"")})}>Sell</button>}
+                <button className="link" style={{color:"var(--red)"}} onClick={()=>del(h.ticker,h.account)}>Delete</button>
               </div>
             </div>
           </div>}
@@ -1122,7 +1131,7 @@ function Brief({state, dispatch}) {
 
   const list = (rows,title,extra) => rows?.length>0 && <div className="card">
     <h2>{title}{extra}</h2>
-    {rows.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+    {rows.map((h,i)=><div className="srow" key={`${h.ticker}-${i}`} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
       <div style={{flex:1}}>
         <div style={{display:"flex",alignItems:"center",gap:9}}>
           <b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
