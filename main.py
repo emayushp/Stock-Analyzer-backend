@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1245,20 +1246,56 @@ def run_under20_screener(force: bool = False) -> ScreenerResponse:
     return response
 
 
-def fetch_high_volume_tickers(count: int = 20) -> List[str]:
+def fetch_high_volume_tickers(us_count: int = 15, ca_count: int = 5) -> List[str]:
     """
-    Today's actual highest-volume US tickers, live from Yahoo's "most_actives"
-    screen — deliberately NOT limited to SCREENER_UNIVERSE, so names outside
-    this app's fixed scan list still show up here when they're genuinely
-    trading heavy volume today.
+    Today's actual highest-volume tickers, live from Yahoo — both US and
+    Canadian markets, deliberately NOT limited to SCREENER_UNIVERSE, so names
+    outside this app's fixed scan list still show up here when they're
+    genuinely trading heavy volume today.
+
+    Two separate queries, not one combined sort: Yahoo's predefined
+    "most_actives" screen only covers US-region tickers, and US mega-cap
+    share volume (hundreds of millions of shares/day) would swamp every
+    Canadian name if ranked together on raw share volume. The Canadian
+    query uses its own, much lower volume/market-cap thresholds — TSX/TSX-V
+    liquidity is a different scale entirely.
     """
-    try:
-        result = yf.screen("most_actives", count=count)
+    def fetch_us() -> List[str]:
+        result = yf.screen("most_actives", count=us_count)
         quotes = (result or {}).get("quotes", [])
-        return [q["symbol"] for q in quotes if q.get("symbol")][:count]
-    except Exception as e:
-        logger.warning(f"High-volume screen fetch failed: {e}")
-        return []
+        # yf.screen() internally defaults 'count' to 25 for custom queries
+        # regardless of what's passed (see fetch_ca below) — slice locally
+        # rather than trust the API to honor the requested size.
+        return [q["symbol"] for q in quotes if q.get("symbol")][:us_count]
+
+    def fetch_ca() -> List[str]:
+        ca_query = yf.EquityQuery("and", [
+            yf.EquityQuery("eq", ["region", "ca"]),
+            yf.EquityQuery("gte", ["intradaymarketcap", 300_000_000]),
+            yf.EquityQuery("gt", ["dayvolume", 300_000]),
+        ])
+        # Custom (non-predefined) queries are documented to take `size`, but
+        # yf.screen() still fills an unset `count` with its own default (25)
+        # and sends both fields — pass count too and slice locally either way,
+        # since which one Yahoo's endpoint actually honors isn't documented.
+        result = yf.screen(ca_query, sortField="dayvolume", sortAsc=False, size=ca_count, count=ca_count)
+        quotes = (result or {}).get("quotes", [])
+        return [q["symbol"] for q in quotes if q.get("symbol")][:ca_count]
+
+    tickers: List[str] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        us_future = pool.submit(fetch_us)
+        ca_future = pool.submit(fetch_ca)
+        try:
+            tickers.extend(us_future.result())
+        except Exception as e:
+            logger.warning(f"US high-volume screen fetch failed: {e}")
+        try:
+            tickers.extend(ca_future.result())
+        except Exception as e:
+            logger.warning(f"Canadian high-volume screen fetch failed: {e}")
+
+    return tickers
 
 
 def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
@@ -1268,7 +1305,7 @@ def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
             payload = cached[1]
             return HighVolumeResponse(**{**payload, "cached": True})
 
-    tickers = fetch_high_volume_tickers(20)
+    tickers = fetch_high_volume_tickers()
     if not tickers:
         return HighVolumeResponse(
             stocks=[],
@@ -1298,12 +1335,24 @@ def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
             cached=False,
         )
 
+    # One region's fetch can fail while the other succeeds (fetch_high_volume_tickers
+    # logs but doesn't raise) — say so rather than claiming full US+CA coverage
+    # when the result is actually one-sided.
+    has_us = any(not t.endswith((".TO", ".V", ".CN")) for t in tickers)
+    has_ca = any(t.endswith((".TO", ".V", ".CN")) for t in tickers)
+    if has_us and has_ca:
+        markets_note = "Today's highest-volume US and Canadian tickers"
+    elif has_us:
+        markets_note = "Today's highest-volume US tickers (Canadian data was unavailable this refresh)"
+    else:
+        markets_note = "Today's highest-volume Canadian tickers (US data was unavailable this refresh)"
+
     response = HighVolumeResponse(
         stocks=stocks,
         universe_note=(
-            "Today's highest-volume US tickers on Yahoo Finance, refreshed live every "
-            "15 minutes — not the fixed scan list used elsewhere, so names can appear "
-            "here even if you've never added or scanned them before."
+            f"{markets_note} on Yahoo Finance, refreshed live every 15 minutes — not the "
+            "fixed scan list used elsewhere, so names can appear here even if you've never "
+            "added or scanned them before."
         ),
         generated_at=datetime.now(timezone.utc).isoformat(),
         cached=False,
@@ -1709,7 +1758,7 @@ def screener_under20(force: bool = False):
 
 @app.get("/api/screener/high-volume", response_model=HighVolumeResponse)
 def screener_high_volume(force: bool = False):
-    """Today's 20 highest-volume US tickers, live — not limited to SCREENER_UNIVERSE."""
+    """Today's 20 highest-volume US and Canadian tickers, live — not limited to SCREENER_UNIVERSE."""
     return run_high_volume_screener(force=force)
 
 
