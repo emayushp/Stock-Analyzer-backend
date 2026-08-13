@@ -360,6 +360,7 @@ class PortfolioHolding(BaseModel):
     ticker: str
     shares: float
     cost_basis: float  # average price paid per share
+    account: Optional[str] = None  # e.g. "TFSA", "FHSA", "Non-Registered" — display/grouping only
 
 
 class PortfolioRequest(BaseModel):
@@ -370,6 +371,7 @@ class HoldingResult(BaseModel):
     ticker: str
     shares: float
     cost_basis: float
+    account: Optional[str] = None
     current_price: Optional[float]
     currency: str
     market_value: Optional[float]
@@ -453,6 +455,8 @@ def detect_market(ticker: str) -> str:
         return "TSX-V"
     if t.endswith(".CN"):
         return "CSE"
+    if t.endswith(".NE"):
+        return "NEO"
     return "US"
 
 
@@ -1338,8 +1342,8 @@ def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
     # One region's fetch can fail while the other succeeds (fetch_high_volume_tickers
     # logs but doesn't raise) — say so rather than claiming full US+CA coverage
     # when the result is actually one-sided.
-    has_us = any(not t.endswith((".TO", ".V", ".CN")) for t in tickers)
-    has_ca = any(t.endswith((".TO", ".V", ".CN")) for t in tickers)
+    has_us = any(not t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
+    has_ca = any(t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
     if has_us and has_ca:
         markets_note = "Today's highest-volume US and Canadian tickers"
     elif has_us:
@@ -1426,7 +1430,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     for h in holdings:
         t = h.ticker.strip().upper()
         r = scored.get(t, {})
-        currency = "CAD" if t.endswith((".TO", ".V", ".CN")) else "USD"
+        currency = "CAD" if t.endswith((".TO", ".V", ".CN", ".NE")) else "USD"
         fx = usd_cad_rate if (currency == "USD" and usd_cad_rate) else 1.0
 
         cost_native = h.shares * h.cost_basis
@@ -1435,7 +1439,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
         if r.get("error") or r.get("price") is None:
             results.append(
                 HoldingResult(
-                    ticker=t, shares=h.shares, cost_basis=h.cost_basis,
+                    ticker=t, shares=h.shares, cost_basis=h.cost_basis, account=h.account,
                     current_price=None, currency=currency, market_value=None,
                     unrealized_pl=None, unrealized_pl_pct=None,
                     day_pl=None, day_pl_pct=None,
@@ -1463,7 +1467,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
 
         results.append(
             HoldingResult(
-                ticker=t, shares=h.shares, cost_basis=h.cost_basis,
+                ticker=t, shares=h.shares, cost_basis=h.cost_basis, account=h.account,
                 current_price=price, currency=currency,
                 market_value=round(value_native, 2),
                 unrealized_pl=round(pl_native, 2), unrealized_pl_pct=pl_pct,
@@ -1638,7 +1642,7 @@ def analyze(ticker: str):
         info = {}
 
     company_name = info.get("longName") or info.get("shortName") or ticker
-    currency = info.get("currency") or ("CAD" if ticker.endswith((".TO", ".V", ".CN")) else "USD")
+    currency = info.get("currency") or ("CAD" if ticker.endswith((".TO", ".V", ".CN", ".NE")) else "USD")
 
     close = hist["Close"]
     current_price = round(float(close.iloc[-1]), 2)
@@ -1711,7 +1715,7 @@ def analyze(ticker: str):
         # underlying's own track record is the relevant one to check.
         technical = apply_track_record(technical, underlying["ticker"])
 
-    regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
+    regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN", ".NE")))
     earnings = fetch_earnings(stock)
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
@@ -2384,7 +2388,7 @@ def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
     # Relative strength vs a market benchmark (S&P 500 for US names, TSX for
     # Canadian). One extra request per comparison — acceptable here since this
     # is an on-demand analysis, not something the screener runs in bulk.
-    benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN")) else "^GSPC"
+    benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN", ".NE")) else "^GSPC"
     benchmark = _get_benchmark(benchmark_symbol, period)
     df["rel_strength"] = _relative_strength(close, benchmark)
 
@@ -3243,7 +3247,7 @@ def quotes(tickers: str = ""):
         if cached and now - cached[0] < _QUOTES_TTL_SECONDS:
             results.append(Quote(
                 ticker=s, price=cached[1],
-                currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+                currency="CAD" if s.endswith((".TO", ".V", ".CN", ".NE")) else "USD",
             ))
         else:
             fresh_needed.append(s)
@@ -3261,7 +3265,7 @@ def quotes(tickers: str = ""):
                     _QUOTES_CACHE[s] = (now, price)
                     results.append(Quote(
                         ticker=s, price=price,
-                        currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+                        currency="CAD" if s.endswith((".TO", ".V", ".CN", ".NE")) else "USD",
                     ))
                 except Exception:
                     results.append(Quote(ticker=s, price=None, currency="USD", error="No data"))
