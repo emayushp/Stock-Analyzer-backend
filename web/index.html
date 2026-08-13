@@ -1255,7 +1255,9 @@ function Journal({state, dispatch}) {
 
 /* ===== Screener ===== */
 function Screener({dispatch}) {
+  const [source,setSource] = useState("universe"); // "universe" | "highvolume"
   const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+  const [hv,setHv] = useState(null), [hvBusy,setHvBusy] = useState(false), [hvErr,setHvErr] = useState(null);
   const [filter,setFilter] = useState("all");
 
   useEffect(()=>{
@@ -1266,18 +1268,38 @@ function Screener({dispatch}) {
     return ()=>{ dead = true; };
   },[]);
 
-  const rows = d ? [
+  useEffect(()=>{
+    if (source!=="highvolume" || hv || hvBusy) return;
+    let dead = false;
+    setHvBusy(true);
+    api("/api/screener/high-volume").then(j=>{ if(!dead) setHv(j); })
+      .catch(e=>{ if(!dead) setHvErr(e.message); })
+      .finally(()=>{ if(!dead) setHvBusy(false); });
+    return ()=>{ dead = true; };
+  },[source]);
+
+  const universeRows = d ? [
     ...(d.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"})),
     ...(d.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"})),
   ] : [];
+  const rows = source==="highvolume" ? (hv?.stocks||[]) : universeRows;
   const filtered = filter==="all" ? rows : rows.filter(r=>r.signal===filter.toUpperCase());
+  const activeBusy = source==="highvolume" ? hvBusy : busy;
+  const activeErr = source==="highvolume" ? hvErr : err;
+  const note = source==="highvolume" ? hv?.universe_note : d?.universe_note;
 
   return <>
     <div style={{margin:"22px 0 16px"}}><h1>Screener</h1><div className="tag">Scanned candidates · buy & sell signals</div></div>
-    {busy && <Spin t="Scanning universe…"/>}
-    {err && <div className="err"><b>Couldn't load screener</b>{err}</div>}
-    {d && !busy && <>
-      {d.universe_note && <p className="note" style={{marginTop:0}}>{d.universe_note}</p>}
+
+    <div className="chips" style={{marginBottom:10}}>
+      {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"]].map(([k,l])=>
+        <div key={k} className={"chip"+(source===k?" on":"")} onClick={()=>setSource(k)}>{l}</div>)}
+    </div>
+
+    {activeBusy && <Spin t={source==="highvolume" ? "Fetching today's most active tickers…" : "Scanning universe…"}/>}
+    {activeErr && <div className="err"><b>Couldn't load screener</b>{activeErr}</div>}
+    {!activeBusy && !activeErr && (source==="highvolume" ? hv : d) && <>
+      {note && <p className="note" style={{marginTop:0}}>{note}</p>}
       <div className="chips" style={{marginTop:14}}>
         {[["all","All"],["buy","Buy"],["sell","Sell"]].map(([k,l])=>
           <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
@@ -1301,9 +1323,15 @@ function Screener({dispatch}) {
             </div>;
           })}
         </div>}
-      <p className="center" style={{fontSize:11,padding:"10px 0"}}>
-        Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
-      </p>
+      {source==="universe" ? (
+        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+          Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
+        </p>
+      ) : (
+        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+          {hv.stocks.length} tickers{hv.generated_at?` · ${new Date(hv.generated_at).toLocaleString()}`:""}{hv.cached?" · cached":""}
+        </p>
+      )}
     </>}
   </>;
 }
