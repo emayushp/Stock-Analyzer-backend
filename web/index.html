@@ -104,7 +104,7 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
 .prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-top:1px solid var(--border);padding:11px 0}
+.hl{border-radius:10px;background:var(--card);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
 .hl .t{font-size:13px;line-height:1.45;margin-top:5px}
 .hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.45}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
@@ -304,15 +304,11 @@ function Backtest({ticker}) {
     try { setAg(await api(`/api/backtest/aggregate?period=5y`)); }
     catch(e){ setAg({error:e.message}); } finally { setABusy(false); } };
 
-  const block = (bt,label) => {
-    const ten = bt.horizons?.find(h=>h.days===10);
-    const thin = bt.event_count < 10;
-    const good = ten?.net_edge > .5, bad = ten?.edge <= 0;
-    const c = thin?"var(--amber)":good?"var(--green)":bad?"var(--red)":"var(--muted)";
-    return <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid var(--border)"}}>
-      <div className="lbl" style={{marginBottom:7}}>{label}</div>
+  const block = (bt,label,accent) => {
+    return <div className="card" style={{borderColor:accent+"44",marginTop:14,marginBottom:0}}>
+      <div className="lbl" style={{color:accent,marginBottom:6}}>{label.toUpperCase()}</div>
       <p className="plain">{bt.plain_summary || `The app gave this signal ${bt.event_count} times.`}</p>
-      {bt.plain_result && <p className="plain" style={{color:c,marginTop:9,fontWeight:600}}>{bt.plain_result}</p>}
+      {bt.plain_result && <p className="plain" style={{color:accent,marginTop:8,fontWeight:700}}>{bt.plain_result}</p>}
     </div>;
   };
 
@@ -328,8 +324,8 @@ function Backtest({ticker}) {
     {d && !busy && <>
       <div className="ranges">{["1y","2y","5y"].map(p=>
         <button key={p} className={period===p?"on":""} onClick={()=>run(p)}>{p.toUpperCase()}</button>)}</div>
-      {block(d.buy,"When the app said BUY")}
-      {block(d.sell,"When the app said SELL")}
+      {block(d.buy,"When the app said BUY","var(--green)")}
+      {block(d.sell,"When the app said SELL","var(--amber)")}
       <div style={{marginTop:16,paddingTop:14,borderTop:"1px solid var(--border)"}}>
         <p className="mut">Over this whole period, simply buying and holding {ticker} returned{" "}
           <b style={{color:d.buy_and_hold_return>=0?"var(--green)":"var(--red)"}}>{pct(d.buy_and_hold_return)}</b>.
@@ -445,7 +441,7 @@ function ConvictionTest({ticker}) {
 
 /* ===== Position sizing — computed client-side from the stop distance ===== */
 function Sizer({entry, stop, currency, portfolioValue}) {
-  const [risk,setRisk] = useState(1);
+  const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
   if (entry == null || stop == null || !portfolioValue) return null;
   const perShare = Math.abs(entry-stop);
   if (perShare <= 0) return null;
@@ -466,6 +462,35 @@ function Sizer({entry, stop, currency, portfolioValue}) {
       That's {weight.toFixed(0)}% of your portfolio in one stock. The stop caps the loss, but a gap down
       past it would hurt more than {risk}% suggests.</p>}
   </div>;
+}
+
+/* ===== Earnings track record — beat/miss squares, with detail on demand ===== */
+function EarningsTrack({quarters}) {
+  const [show,setShow] = useState(false);
+  if (!quarters?.length) return null;
+  const recent = quarters.slice(0,4);
+  return <>
+    <div className="rule"/>
+    <div style={{display:"flex",gap:6,marginBottom:12}}>
+      {recent.map((qq,i)=>{
+        const beat = qq.surprise_pct!=null ? qq.surprise_pct>0 : null;
+        const c = beat==null?"var(--muted)":beat?"var(--green)":"var(--red)";
+        return <div key={i} style={{flex:1,textAlign:"center",padding:8,borderRadius:8,background:"var(--card)",border:"1px solid var(--border)"}}>
+          <div style={{color:c,fontSize:13}}>{beat==null?"–":beat?"✓":"✕"}</div>
+        </div>;
+      })}
+    </div>
+    <button className="link" onClick={()=>setShow(!show)}>{show?"▲  Hide details":"Show quarter details →"}</button>
+    {show && <div style={{marginTop:10}}>
+      {quarters.map((qq,i)=><div className="row" key={i}>
+        <span className="num">{qq.date}</span>
+        <span>{qq.eps_actual!=null?`$${qq.eps_actual}`:"—"}
+          {qq.eps_estimate!=null?` vs $${qq.eps_estimate} est.`:""}
+          {qq.surprise_pct!=null && <b style={{marginLeft:8,color:qq.surprise_pct>0?"var(--green)":"var(--red)"}}>
+            {pct(qq.surprise_pct)}</b>}</span>
+      </div>)}
+    </div>}
+  </>;
 }
 
 /* ===== Analyze ===== */
@@ -624,14 +649,7 @@ function Analyze({state, dispatch}) {
           {data.earnings && <div className="card">
             <h2>Earnings</h2>
             <Row l="Next earnings date" v={data.earnings.next_earnings_date || "Not scheduled"}/>
-            {data.earnings.recent_quarters.length>0 && <><div className="rule"/>
-              {data.earnings.recent_quarters.map((qq,i)=><div className="row" key={i}>
-                <span className="num">{qq.date}</span>
-                <span>{qq.eps_actual!=null?`$${qq.eps_actual}`:"—"}
-                  {qq.eps_estimate!=null?` vs $${qq.eps_estimate} est.`:""}
-                  {qq.surprise_pct!=null && <b style={{marginLeft:8,color:qq.surprise_pct>0?"var(--green)":"var(--red)"}}>
-                    {pct(qq.surprise_pct)}</b>}</span>
-              </div>)}</>}
+            <EarningsTrack quarters={data.earnings.recent_quarters}/>
             <p className="note">{data.earnings.note}</p>
           </div>}
 
@@ -1235,6 +1253,119 @@ function Journal({state, dispatch}) {
   </>;
 }
 
+/* ===== Screener ===== */
+function Screener({dispatch}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+  const [filter,setFilter] = useState("all");
+
+  useEffect(()=>{
+    let dead = false;
+    api("/api/screener").then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[]);
+
+  const rows = d ? [
+    ...(d.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"})),
+    ...(d.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"})),
+  ] : [];
+  const filtered = filter==="all" ? rows : rows.filter(r=>r.signal===filter.toUpperCase());
+
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Screener</h1><div className="tag">Scanned candidates · buy & sell signals</div></div>
+    {busy && <Spin t="Scanning universe…"/>}
+    {err && <div className="err"><b>Couldn't load screener</b>{err}</div>}
+    {d && !busy && <>
+      {d.universe_note && <p className="note" style={{marginTop:0}}>{d.universe_note}</p>}
+      <div className="chips" style={{marginTop:14}}>
+        {[["all","All"],["buy","Buy"],["sell","Sell"]].map(([k,l])=>
+          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+      </div>
+      {filtered.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches this filter right now.</p></div> :
+        <div className="card">
+          {filtered.map(c=>{
+            const sc = SIG[c.signal] || "var(--amber)";
+            return <div className="srow" key={c.ticker} onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
+              <div style={{display:"flex",alignItems:"center",gap:10,flex:1}}>
+                <div className="dot" style={{background:sc,marginTop:0}}/>
+                <div>
+                  <b className="num">{c.ticker}</b>
+                  <div className="meta">RSI {c.rsi ?? "—"} · Vol {c.volume_ratio!=null?c.volume_ratio+"×":"—"}</div>
+                </div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div className="num">{c.price ?? "—"}</div>
+                {c.change_pct!=null && <div className="num" style={{fontSize:11,color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)}</div>}
+              </div>
+            </div>;
+          })}
+        </div>}
+      <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+        Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
+      </p>
+    </>}
+  </>;
+}
+
+/* ===== Learn — Stocks 101, plain-English accordion ===== */
+const LEARN_SECTIONS = [
+  {t:"What is a stock?", b:"A share of stock is a tiny slice of ownership in a company. Its price is simply whatever a buyer and seller last agreed it's worth — not a fixed value set by the company. That's why the same stock can trade at different prices minute to minute, even if nothing about the actual business changed."},
+  {t:"What actually moves the price?", b:"In the short term: supply and demand — more buyers than sellers pushes price up, and vice versa. What drives that demand includes earnings reports, news, interest rates, sector trends, and plain sentiment. In the long term, price tends to track the company's actual profits and growth. Short-term moves and long-term value can disagree for a long time before they converge."},
+  {t:"Technical analysis, in plain English", b:"Technical analysis studies price and volume patterns to gauge momentum — the idea being that crowd behavior leaves visible fingerprints on a chart. RSI measures how fast a price has moved recently. MACD compares a fast vs. slow moving average to gauge whether momentum is accelerating or fading. Volume shows how many people are actually behind a move. All of them describe what already happened, not what will happen next."},
+  {t:"Why volume matters", b:"A price move on heavy volume means lots of people participated — there's real conviction behind it. The same move on light volume can be noise, easily reversed. That's why this app reports volume as a separate conviction rating rather than folding it into Buy/Sell: volume tells you how much to trust a signal, not which direction it points."},
+  {t:"Reading fundamentals", b:"Market cap is the company's total value. P/E ratio compares price to earnings — a rough gauge of whether a stock is expensive relative to what it actually earns, though \"high\" varies wildly by industry. Beta measures how much the stock swings relative to the overall market: above 1 means more volatile, below 1 means steadier. The 52-week range shows where today's price sits versus the past year."},
+  {t:"Why news sentiment matters", b:"Markets often react to how a story is perceived before the real business impact is known — a single bad headline can move a price in minutes. This app runs recent headlines through FinBERT, an AI model trained specifically on financial language, so it understands that \"beats estimates\" is bullish and \"misses guidance\" is bearish in ways a general model wouldn't. Still, five headlines are a small sample."},
+  {t:"Risk management 101", b:"A stop-loss caps how much you're willing to lose if a trade goes wrong. A take-profit defines what \"it worked\" looks like. The ratio between them — reward-to-risk — tells you how much you stand to gain versus what you're risking. A 2:1 ratio means you can be wrong more often than you're right and still come out ahead, which is why traders often care more about that ratio than about being right."},
+  {t:"What this app doesn't do", b:"It doesn't evaluate whether a business is actually healthy (revenue trends, debt, competitive position), doesn't account for macroeconomic conditions, and doesn't know your personal financial situation or risk tolerance. It combines narrow signals mechanically. Useful as one input among many — not a substitute for research, and nothing here is financial advice."},
+];
+
+function Learn() {
+  const [open,setOpen] = useState({0:true});
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Learn</h1><div className="tag">Stocks 101 · plain-English basics</div></div>
+    {LEARN_SECTIONS.map((s,i)=>{
+      const o = !!open[i];
+      return <div key={i} className="card" style={{borderColor:o?"rgba(79,168,130,.27)":"var(--border)",cursor:"pointer"}}
+        onClick={()=>setOpen({...open,[i]:!o})}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <b style={{fontSize:14}}>{s.t}</b>
+          <span style={{fontSize:14,color:o?"var(--green)":"var(--faint)"}}>{o?"▲":"▼"}</span>
+        </div>
+        {o && <p className="mut" style={{marginTop:8,lineHeight:1.55}}>{s.b}</p>}
+      </div>;
+    })}
+  </>;
+}
+
+/* ===== Settings ===== */
+function Settings() {
+  const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
+  const [currency,setCurrency] = useState(()=>store.get("ma_currency","CAD"));
+
+  const setRiskP = r => { setRisk(r); store.set("ma_risk_pct", r); };
+  const setCur = c => { setCurrency(c); store.set("ma_currency", c); };
+
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Settings</h1><div className="tag">Defaults for this device</div></div>
+    <div className="card">
+      <h2>Default risk per trade</h2>
+      <p className="mut" style={{marginBottom:12}}>Sets the starting risk % in the position-sizing calculator on Analyze.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {[0.5,1,2,3].map(r=><div key={r} className={"chip"+(risk===r?" on":"")} onClick={()=>setRiskP(r)}>{r}%</div>)}
+      </div>
+    </div>
+    <div className="card">
+      <h2>Display currency</h2>
+      <p className="mut" style={{marginBottom:12}}>Preferred currency for figures this app doesn't otherwise infer from the ticker itself.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {["CAD","USD"].map(c=><div key={c} className={"chip"+(currency===c?" on":"")} onClick={()=>setCur(c)}>{c}</div>)}
+      </div>
+    </div>
+    <p className="note">Saved on this device only — nothing here is sent anywhere.</p>
+  </>;
+}
+
 /* ===== Log decision modal ===== */
 function LogModal({data, onSave, onClose}) {
   const [act,setAct] = useState(null), [note,setNote] = useState("");
@@ -1316,7 +1447,8 @@ function App() {
     <header><div className="hdr">
       <div className="logo"><Logo/></div>
       <div><h1>Market Analyzer</h1><div className="tag">Measured signals · not predictions</div></div>
-      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["brief","Brief"],["journal","Journal"]].map(([k,l])=>
+      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["brief","Brief"],["journal","Journal"],
+        ["screener","Screener"],["learn","Learn"],["settings","Settings"]].map(([k,l])=>
         <button key={k} className={tab===k?"on":""} onClick={()=>setTab(k)}>{l}</button>)}</nav>
     </div></header>
     <div className="wrap">
@@ -1324,6 +1456,9 @@ function App() {
       {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
       {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
       {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
+      {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
+      {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
+      {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
     </div>
     {logOpen && data && <LogModal data={data} onClose={()=>setLogOpen(false)}
       onSave={e=>{ const n=[e,...journal]; setJournal(n); store.set("ma_journal",n); setLogOpen(false);
