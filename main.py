@@ -138,6 +138,12 @@ _SCREENER_TTL_SECONDS = 3600  # 1 hour — screening is not a minute-to-minute a
 _UNDER20_CACHE: Dict[str, Tuple[float, Any]] = {}
 _UNDER20_TTL_SECONDS = 3600
 
+# The "most actives" list shifts through the trading day but not second to
+# second — 15 minutes keeps this responsive without hammering Yahoo's
+# screener endpoint on every app open.
+_HIGH_VOLUME_CACHE: Dict[str, Tuple[float, Any]] = {}
+_HIGH_VOLUME_TTL_SECONDS = 900
+
 # USD/CAD barely moves minute to minute — cache aggressively.
 _FX_CACHE: Dict[str, Tuple[float, float]] = {}
 _FX_TTL_SECONDS = 3600
@@ -337,6 +343,13 @@ class ScreenerResponse(BaseModel):
     buy_candidates: List[ScreenerHit]
     sell_candidates: List[ScreenerHit]
     scanned_count: int
+    universe_note: str
+    generated_at: str
+    cached: bool = False
+
+
+class HighVolumeResponse(BaseModel):
+    stocks: List[ScreenerHit]
     universe_note: str
     generated_at: str
     cached: bool = False
@@ -1232,6 +1245,73 @@ def run_under20_screener(force: bool = False) -> ScreenerResponse:
     return response
 
 
+def fetch_high_volume_tickers(count: int = 20) -> List[str]:
+    """
+    Today's actual highest-volume US tickers, live from Yahoo's "most_actives"
+    screen — deliberately NOT limited to SCREENER_UNIVERSE, so names outside
+    this app's fixed scan list still show up here when they're genuinely
+    trading heavy volume today.
+    """
+    try:
+        result = yf.screen("most_actives", count=count)
+        quotes = (result or {}).get("quotes", [])
+        return [q["symbol"] for q in quotes if q.get("symbol")][:count]
+    except Exception as e:
+        logger.warning(f"High-volume screen fetch failed: {e}")
+        return []
+
+
+def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
+    if not force:
+        cached = _HIGH_VOLUME_CACHE.get("high_volume")
+        if cached and time.time() - cached[0] < _HIGH_VOLUME_TTL_SECONDS:
+            payload = cached[1]
+            return HighVolumeResponse(**{**payload, "cached": True})
+
+    tickers = fetch_high_volume_tickers(20)
+    if not tickers:
+        return HighVolumeResponse(
+            stocks=[],
+            universe_note="Could not fetch today's high-volume list from Yahoo right now — try again shortly.",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            cached=False,
+        )
+
+    scored = batch_score(tickers)
+    # Preserve Yahoo's own volume-descending order rather than re-sorting by
+    # conviction — the point of this panel is the volume ranking itself.
+    stocks = [
+        ScreenerHit(**scored[t])
+        for t in tickers
+        if scored.get(t) and not scored[t].get("error") and scored[t].get("price") is not None
+    ]
+
+    if not stocks:
+        # batch_score() failed for every ticker (rate limit / network blip on
+        # the price-history call, separate from the screen call above) —
+        # don't cache an empty "success" that would hide the failure for the
+        # full TTL, same as the empty-ticker-list guard above.
+        return HighVolumeResponse(
+            stocks=[],
+            universe_note="Could not score today's high-volume tickers right now — try again shortly.",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            cached=False,
+        )
+
+    response = HighVolumeResponse(
+        stocks=stocks,
+        universe_note=(
+            "Today's highest-volume US tickers on Yahoo Finance, refreshed live every "
+            "15 minutes — not the fixed scan list used elsewhere, so names can appear "
+            "here even if you've never added or scanned them before."
+        ),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        cached=False,
+    )
+    _HIGH_VOLUME_CACHE["high_volume"] = (time.time(), response.model_dump())
+    return response
+
+
 def describe_holding_context(pl_pct: Optional[float], signal: str) -> str:
     """
     Frames what the indicators say against the position's P/L, without telling
@@ -1625,6 +1705,12 @@ def screener(force: bool = False):
 def screener_under20(force: bool = False):
     """Canadian stocks under CAD $20, screened for current momentum signals."""
     return run_under20_screener(force=force)
+
+
+@app.get("/api/screener/high-volume", response_model=HighVolumeResponse)
+def screener_high_volume(force: bool = False):
+    """Today's 20 highest-volume US tickers, live — not limited to SCREENER_UNIVERSE."""
+    return run_high_volume_screener(force=force)
 
 
 HISTORY_RANGES = {
