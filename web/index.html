@@ -104,7 +104,7 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
 .prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-top:1px solid var(--border);padding:11px 0}
+.hl{border-radius:10px;background:var(--card);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
 .hl .t{font-size:13px;line-height:1.45;margin-top:5px}
 .hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.45}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
@@ -151,6 +151,140 @@ const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
 const SENT = { positive:"var(--green)", negative:"var(--red)", neutral:"var(--muted)" };
 const fmt = n => n == null ? "—" : Number(n).toLocaleString();
 const pct = n => n == null ? "—" : `${n >= 0 ? "+" : ""}${n}%`;
+
+/* ===== Wealthsimple CSV import — holdings snapshot & activity log =====
+   Ported byte-for-byte (logic-wise) from the mobile app's already-tested
+   parser. See the two-pass FX-Rate resolver in resolveWSTicker/parseActivityCSV —
+   do not "simplify" to a currency==="CAD" check, that misclassifies real
+   US tickers like NVDA/VOO as .TO. */
+function parseCSVRows(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field); field = "";
+    } else if (c === "\n") {
+      row.push(field); rows.push(row); row = []; field = "";
+    } else if (c === "\r") {
+      // ignore — \n (or its absence at EOF) handles line breaks
+    } else {
+      field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function csvToObjects(text) {
+  const rows = parseCSVRows(text).filter((r) => r.some((f) => f.trim() !== ""));
+  if (!rows.length) return [];
+  const headers = rows[0].map((h) => h.trim());
+  return rows
+    .slice(1)
+    .filter((r) => r.length === headers.length) // drops Wealthsimple's trailing "As of ..." footer line
+    .map((r) => Object.fromEntries(headers.map((h, i) => [h, (r[i] || "").trim()])));
+}
+
+function resolveWSTicker(symbol, name, currency, knownForeign) {
+  const s = (symbol || "").trim().toUpperCase();
+  if (!s) return null;
+  if (/\.(TO|V|CN|NE)$/.test(s)) return { ticker: s, guessed: false };
+  const isHedgedCDR = /\bcdr\b|cad[\s-]?hedged/i.test(name || "");
+  if (isHedgedCDR) return { ticker: `${s}.NE`, guessed: false };
+  if (knownForeign) return { ticker: s, guessed: false };
+  if ((currency || "").trim().toUpperCase() === "CAD") {
+    return { ticker: `${s}.TO`, guessed: true };
+  }
+  return { ticker: s, guessed: false };
+}
+
+function parseHoldingsCSV(text) {
+  const rows = csvToObjects(text);
+  const holdings = [];
+  const guessed = [];
+  let cashCAD = 0;
+  for (const r of rows) {
+    if (r["Security Type"] === "CURRENCY") {
+      if ((r["Symbol"] || "").toUpperCase() === "CAD") {
+        cashCAD += parseFloat(r["Quantity"]) || 0;
+      }
+      continue;
+    }
+    const qty = parseFloat(r["Quantity"]);
+    const bookValue = parseFloat(r["Book Value (CAD)"]);
+    if (!qty || !bookValue) continue;
+    const resolved = resolveWSTicker(r["Symbol"], r["Name"], r["Market Price Currency"]);
+    if (!resolved) continue;
+    if (resolved.guessed) guessed.push(resolved.ticker);
+    holdings.push({
+      ticker: resolved.ticker,
+      shares: qty,
+      cost_basis: Math.round((bookValue / qty) * 100) / 100,
+      account: r["Account Type"] || null,
+    });
+  }
+  return { holdings, cashCAD: Math.round(cashCAD * 100) / 100, guessed };
+}
+
+function mergeHoldings(existing, imported) {
+  const key = (h) => `${h.ticker}__${h.account || ""}`;
+  const map = new Map(existing.map((h) => [key(h), h]));
+  for (const h of imported) map.set(key(h), h);
+  return Array.from(map.values());
+}
+
+function activityKey(a) {
+  return [a.at, a.type, a.subType, a.ticker, a.quantity, a.amount].join("|");
+}
+
+function parseActivityCSV(text) {
+  const rows = csvToObjects(text);
+  const confirmedForeign = new Set();
+  for (const r of rows) {
+    const sym = (r["symbol"] || "").trim().toUpperCase();
+    if (sym && /fx rate/i.test(r["description"] || "")) confirmedForeign.add(sym);
+  }
+  const activities = [];
+  for (const r of rows) {
+    const amount = parseFloat(r["net_cash_amount"]);
+    if (!r["effective_at"] || Number.isNaN(amount)) continue;
+    const symbol = (r["symbol"] || "").trim();
+    let ticker = null;
+    if (symbol) {
+      const resolved = resolveWSTicker(symbol, r["name"], r["currency"], confirmedForeign.has(symbol.toUpperCase()));
+      ticker = resolved ? resolved.ticker : symbol;
+    }
+    activities.push({
+      at: r["effective_at"],
+      account: r["account_type"] || null,
+      type: r["activity_type"] || "",
+      subType: r["activity_sub_type"] || "",
+      description: r["description"] || "",
+      ticker,
+      quantity: r["quantity"] ? parseFloat(r["quantity"]) : null,
+      price: r["unit_price"] ? parseFloat(r["unit_price"]) : null,
+      amount,
+      currency: r["currency"] || "CAD",
+    });
+  }
+  return activities;
+}
+
+function mergeActivities(existing, imported) {
+  const seen = new Set(existing.map(activityKey));
+  const added = imported.filter((a) => !seen.has(activityKey(a)));
+  return [...added, ...existing].sort((a, b) => new Date(b.at) - new Date(a.at));
+}
 
 async function api(path, opts) {
   const r = await fetch(API + path, opts);
@@ -304,15 +438,11 @@ function Backtest({ticker}) {
     try { setAg(await api(`/api/backtest/aggregate?period=5y`)); }
     catch(e){ setAg({error:e.message}); } finally { setABusy(false); } };
 
-  const block = (bt,label) => {
-    const ten = bt.horizons?.find(h=>h.days===10);
-    const thin = bt.event_count < 10;
-    const good = ten?.net_edge > .5, bad = ten?.edge <= 0;
-    const c = thin?"var(--amber)":good?"var(--green)":bad?"var(--red)":"var(--muted)";
-    return <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid var(--border)"}}>
-      <div className="lbl" style={{marginBottom:7}}>{label}</div>
+  const block = (bt,label,accent) => {
+    return <div className="card" style={{borderColor:accent+"44",marginTop:14,marginBottom:0}}>
+      <div className="lbl" style={{color:accent,marginBottom:6}}>{label.toUpperCase()}</div>
       <p className="plain">{bt.plain_summary || `The app gave this signal ${bt.event_count} times.`}</p>
-      {bt.plain_result && <p className="plain" style={{color:c,marginTop:9,fontWeight:600}}>{bt.plain_result}</p>}
+      {bt.plain_result && <p className="plain" style={{color:accent,marginTop:8,fontWeight:700}}>{bt.plain_result}</p>}
     </div>;
   };
 
@@ -328,8 +458,8 @@ function Backtest({ticker}) {
     {d && !busy && <>
       <div className="ranges">{["1y","2y","5y"].map(p=>
         <button key={p} className={period===p?"on":""} onClick={()=>run(p)}>{p.toUpperCase()}</button>)}</div>
-      {block(d.buy,"When the app said BUY")}
-      {block(d.sell,"When the app said SELL")}
+      {block(d.buy,"When the app said BUY","var(--green)")}
+      {block(d.sell,"When the app said SELL","var(--amber)")}
       <div style={{marginTop:16,paddingTop:14,borderTop:"1px solid var(--border)"}}>
         <p className="mut">Over this whole period, simply buying and holding {ticker} returned{" "}
           <b style={{color:d.buy_and_hold_return>=0?"var(--green)":"var(--red)"}}>{pct(d.buy_and_hold_return)}</b>.
@@ -445,7 +575,7 @@ function ConvictionTest({ticker}) {
 
 /* ===== Position sizing — computed client-side from the stop distance ===== */
 function Sizer({entry, stop, currency, portfolioValue}) {
-  const [risk,setRisk] = useState(1);
+  const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
   if (entry == null || stop == null || !portfolioValue) return null;
   const perShare = Math.abs(entry-stop);
   if (perShare <= 0) return null;
@@ -466,6 +596,35 @@ function Sizer({entry, stop, currency, portfolioValue}) {
       That's {weight.toFixed(0)}% of your portfolio in one stock. The stop caps the loss, but a gap down
       past it would hurt more than {risk}% suggests.</p>}
   </div>;
+}
+
+/* ===== Earnings track record — beat/miss squares, with detail on demand ===== */
+function EarningsTrack({quarters}) {
+  const [show,setShow] = useState(false);
+  if (!quarters?.length) return null;
+  const recent = quarters.slice(0,4);
+  return <>
+    <div className="rule"/>
+    <div style={{display:"flex",gap:6,marginBottom:12}}>
+      {recent.map((qq,i)=>{
+        const beat = qq.surprise_pct!=null ? qq.surprise_pct>0 : null;
+        const c = beat==null?"var(--muted)":beat?"var(--green)":"var(--red)";
+        return <div key={i} style={{flex:1,textAlign:"center",padding:8,borderRadius:8,background:"var(--card)",border:"1px solid var(--border)"}}>
+          <div style={{color:c,fontSize:13}}>{beat==null?"–":beat?"✓":"✕"}</div>
+        </div>;
+      })}
+    </div>
+    <button className="link" onClick={()=>setShow(!show)}>{show?"▲  Hide details":"Show quarter details →"}</button>
+    {show && <div style={{marginTop:10}}>
+      {quarters.map((qq,i)=><div className="row" key={i}>
+        <span className="num">{qq.date}</span>
+        <span>{qq.eps_actual!=null?`$${qq.eps_actual}`:"—"}
+          {qq.eps_estimate!=null?` vs $${qq.eps_estimate} est.`:""}
+          {qq.surprise_pct!=null && <b style={{marginLeft:8,color:qq.surprise_pct>0?"var(--green)":"var(--red)"}}>
+            {pct(qq.surprise_pct)}</b>}</span>
+      </div>)}
+    </div>}
+  </>;
 }
 
 /* ===== Analyze ===== */
@@ -624,14 +783,7 @@ function Analyze({state, dispatch}) {
           {data.earnings && <div className="card">
             <h2>Earnings</h2>
             <Row l="Next earnings date" v={data.earnings.next_earnings_date || "Not scheduled"}/>
-            {data.earnings.recent_quarters.length>0 && <><div className="rule"/>
-              {data.earnings.recent_quarters.map((qq,i)=><div className="row" key={i}>
-                <span className="num">{qq.date}</span>
-                <span>{qq.eps_actual!=null?`$${qq.eps_actual}`:"—"}
-                  {qq.eps_estimate!=null?` vs $${qq.eps_estimate} est.`:""}
-                  {qq.surprise_pct!=null && <b style={{marginLeft:8,color:qq.surprise_pct>0?"var(--green)":"var(--red)"}}>
-                    {pct(qq.surprise_pct)}</b>}</span>
-              </div>)}</>}
+            <EarningsTrack quarters={data.earnings.recent_quarters}/>
             <p className="note">{data.earnings.note}</p>
           </div>}
 
@@ -702,6 +854,8 @@ function Portfolio({state, dispatch}) {
   const [filter,setFilter] = useState("all"), [sortBy,setSortBy] = useState("value"), [dir,setDir] = useState("desc");
   const [open,setOpen] = useState({});
   const [sell,setSell] = useState(null);
+  const fileRef = useRef(null);
+  const [importMsg,setImportMsg] = useState(null);
 
   const load = useCallback(async list => {
     const t = list ?? holdings;
@@ -716,16 +870,46 @@ function Portfolio({state, dispatch}) {
 
   useEffect(()=>{ load(); },[holdings.length]);
 
+  const onImportFile = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let parsed;
+      try { parsed = parseHoldingsCSV(reader.result); }
+      catch { alert("Couldn't read that file — make sure it's a Wealthsimple holdings CSV export."); return; }
+      if (!parsed.holdings.length) { alert("No holdings found in that file."); return; }
+      const merged = mergeHoldings(holdings, parsed.holdings);
+      dispatch({type:"holdings", v:merged}); load(merged);
+      if (parsed.cashCAD > 0 && confirm(
+        `This file shows ${fmt(parsed.cashCAD)} CAD cash. Set your cash balance to this amount? (currently ${fmt(cash)})`
+      )) dispatch({type:"cash", v:parsed.cashCAD});
+      setImportMsg(parsed.guessed.length
+        ? `Imported ${parsed.holdings.length} holding(s). Guessed exchange for: ${parsed.guessed.join(", ")} — double-check these resolve to the right stock on Analyze.`
+        : `Imported ${parsed.holdings.length} holding(s) from Wealthsimple.`);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  // Matches ticker AND account, not ticker alone — the same ticker can
+  // legitimately appear once per account (e.g. NVDA held in both an FHSA
+  // and a TFSA after a CSV import), and ticker-only matching would sell
+  // from or delete both at once.
+  const sameHolding = (h, ticker, account) => h.ticker===ticker && (h.account||null)===(account||null);
+
   const save = () => {
     const t = f.ticker.trim().toUpperCase(), sh = parseFloat(f.shares), co = parseFloat(f.cost);
     if (!t||!sh||!co||sh<=0||co<=0) return alert("Enter a ticker, share count, and average price paid.");
     const total = sh*co;
     if (f.deduct && total > cash) return alert(`This costs ${fmt(total)} but you only have ${fmt(cash)} in cash. Add cash first, or turn off "deduct from cash".`);
-    const ex = holdings.find(h=>h.ticker===t);
+    // Only merges with another account-less (manually entered) holding of
+    // the same ticker — not into an imported, account-tagged position.
+    const ex = holdings.find(h=>h.ticker===t && !h.account);
     let next;
     if (ex) { // merge with weighted-average cost rather than overwriting
       const cs = ex.shares+sh;
-      next = holdings.map(h=>h.ticker===t?{ticker:t,shares:cs,
+      next = holdings.map(h=>h===ex?{ticker:t,shares:cs,
         cost_basis:Math.round(((ex.shares*ex.cost_basis+sh*co)/cs)*100)/100}:h);
     } else next = [...holdings,{ticker:t,shares:sh,cost_basis:co}];
     dispatch({type:"holdings", v:next});
@@ -735,17 +919,17 @@ function Portfolio({state, dispatch}) {
 
   const doSell = () => {
     const sh = parseFloat(sell.shares), pr = parseFloat(sell.price);
-    const h = holdings.find(x=>x.ticker===sell.ticker);
+    const h = holdings.find(x=>sameHolding(x, sell.ticker, sell.account));
     if (!h||!sh||!pr||sh<=0||sh>h.shares||pr<=0) return alert(`Enter shares (up to ${h?.shares}) and a sale price.`);
     const rem = h.shares-sh;
-    const next = rem>0.0001 ? holdings.map(x=>x.ticker===sell.ticker?{...x,shares:rem}:x)
-                            : holdings.filter(x=>x.ticker!==sell.ticker);
+    const next = rem>0.0001 ? holdings.map(x=>sameHolding(x, sell.ticker, sell.account)?{...x,shares:rem}:x)
+                            : holdings.filter(x=>!sameHolding(x, sell.ticker, sell.account));
     dispatch({type:"holdings", v:next}); dispatch({type:"cash", v:cash+sh*pr});
     setSell(null); load(next);
   };
 
-  const del = t => { if(!confirm(`Remove ${t}? This is for fixing a wrong entry — it won't change your cash. Use Sell to record a real sale.`))return;
-    const next = holdings.filter(h=>h.ticker!==t); dispatch({type:"holdings", v:next}); load(next); };
+  const del = (t, account) => { if(!confirm(`Remove ${t}${account?` (${account})`:""}? This is for fixing a wrong entry — it won't change your cash. Use Sell to record a real sale.`))return;
+    const next = holdings.filter(h=>!sameHolding(h, t, account)); dispatch({type:"holdings", v:next}); load(next); };
 
   const cashOp = op => {
     const a = parseFloat(amt);
@@ -762,9 +946,15 @@ function Portfolio({state, dispatch}) {
   return <>
     <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
       <div style={{flex:1}}><h1>Portfolio</h1><div className="tag">Your holdings · live P/L · signals</div></div>
+      <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
+      <button className="btn sm ghost" onClick={()=>fileRef.current.click()}>Import from Wealthsimple (CSV)</button>
       <button className="btn sm ghost" onClick={()=>{setCashOpen(false);setAdd(!add);}}>{add?"Cancel":"+ Stock"}</button>
       <button className="btn sm ghost" onClick={()=>{setAdd(false);setCashOpen(!cashOpen);}}>{cashOpen?"Cancel":"+ Cash"}</button>
     </div>
+
+    {importMsg && <div className="banner" style={{borderLeftColor:"var(--accent)"}}>
+      <div className="lbl">Import complete</div><p>{importMsg}</p>
+    </div>}
 
     {add && <div className="card">
       <h2>Add a holding</h2>
@@ -849,17 +1039,18 @@ function Portfolio({state, dispatch}) {
         const vp = filter==="today"?h.day_pl_pct:h.unrealized_pl_pct;
         const c = v==null?"var(--muted)":v>=0?"var(--green)":"var(--red)";
         const sc = SIG[h.signal]||"var(--muted)";
-        return <div className="card" key={h.ticker}>
+        const hKey = `${h.ticker}__${h.account||""}`;
+        return <div className="card" key={hKey}>
           <div style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
-               onClick={()=>setOpen({...open,[h.ticker]:!open[h.ticker]})}>
+               onClick={()=>setOpen({...open,[hKey]:!open[hKey]})}>
             <div style={{flex:1}}><b className="num" style={{fontSize:15}}>{h.ticker}</b>
-              <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}</div></div>
+              <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}{h.account?` · ${h.account}`:""}</div></div>
             {v!=null && <div style={{textAlign:"right"}}>
               <div className="num" style={{fontWeight:700,color:c}}>{v>=0?"+":""}{fmt(v)}</div>
               <div className="num" style={{fontSize:11,color:c}}>{vp>=0?"+":""}{vp}%</div></div>}
-            <span style={{color:"var(--faint)",fontSize:11}}>{open[h.ticker]?"▲":"▼"}</span>
+            <span style={{color:"var(--faint)",fontSize:11}}>{open[hKey]?"▲":"▼"}</span>
           </div>
-          {open[h.ticker] && <div style={{marginTop:10}}>
+          {open[hKey] && <div style={{marginTop:10}}>
             <div className="rule"/>
             {h.error ? <p className="mut">{h.error}</p> : <>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
@@ -878,8 +1069,8 @@ function Portfolio({state, dispatch}) {
               <button className="link" onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>Full analysis →</button>
               <div style={{display:"flex",gap:16}}>
                 {!h.error && <button className="link" style={{color:"var(--amber)"}}
-                  onClick={()=>setSell({ticker:h.ticker,shares:String(h.shares),price:String(h.current_price||"")})}>Sell</button>}
-                <button className="link" style={{color:"var(--red)"}} onClick={()=>del(h.ticker)}>Delete</button>
+                  onClick={()=>setSell({ticker:h.ticker,account:h.account,shares:String(h.shares),price:String(h.current_price||"")})}>Sell</button>}
+                <button className="link" style={{color:"var(--red)"}} onClick={()=>del(h.ticker,h.account)}>Delete</button>
               </div>
             </div>
           </div>}
@@ -940,7 +1131,7 @@ function Brief({state, dispatch}) {
 
   const list = (rows,title,extra) => rows?.length>0 && <div className="card">
     <h2>{title}{extra}</h2>
-    {rows.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+    {rows.map((h,i)=><div className="srow" key={`${h.ticker}-${i}`} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
       <div style={{flex:1}}>
         <div style={{display:"flex",alignItems:"center",gap:9}}>
           <b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
@@ -1235,6 +1426,238 @@ function Journal({state, dispatch}) {
   </>;
 }
 
+/* ===== Activity — imported Wealthsimple transaction history ===== */
+const ACT_LABEL = { MoneyMovement:"Transfer", Dividend:"Dividend", Tax:"Tax", Fee:"Fee" };
+function activityLabel(a) { return a.ticker || ACT_LABEL[a.type] || a.type || "Activity"; }
+function activityColor(a) {
+  if (a.type === "MoneyMovement") return "var(--muted)";
+  return a.amount >= 0 ? "var(--green)" : "var(--red)";
+}
+
+function Activity({state, dispatch}) {
+  const {activity} = state;
+  const fileRef = useRef(null);
+  const [importMsg,setImportMsg] = useState(null);
+  const [filter,setFilter] = useState("all");
+  const [open,setOpen] = useState({});
+
+  const accounts = [...new Set(activity.map(a=>a.account).filter(Boolean))];
+
+  const onImportFile = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let imported;
+      try { imported = parseActivityCSV(reader.result); }
+      catch { alert("Couldn't read that file — make sure it's a Wealthsimple activity CSV export."); return; }
+      if (!imported.length) { alert("No transactions found in that file."); return; }
+      const merged = mergeActivities(activity, imported);
+      dispatch({type:"activity", v:merged});
+      setImportMsg(`Imported ${imported.length} transaction(s) — ${merged.length - activity.length} new, ${imported.length - (merged.length - activity.length)} already on file.`);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const filtered = filter === "all" ? activity : activity.filter(a=>a.account === filter);
+  const sum = pred => filtered.filter(pred).reduce((s,a)=>s+a.amount, 0);
+  const deposited = sum(a=>a.type === "MoneyMovement");
+  const dividends = sum(a=>a.type === "Dividend");
+  const taxFees = sum(a=>a.type === "Tax" || a.type === "Fee");
+
+  return <>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
+      <div style={{flex:1}}><h1>Activity</h1><div className="tag">Imported deposits · trades · dividends</div></div>
+      <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
+      <button className="btn sm ghost" onClick={()=>fileRef.current.click()}>Import from Wealthsimple (CSV)</button>
+    </div>
+
+    {importMsg && <div className="banner" style={{borderLeftColor:"var(--accent)"}}>
+      <div className="lbl">Import complete</div><p>{importMsg}</p>
+    </div>}
+
+    {!activity.length ? <div className="center">
+      <h3>No activity imported yet</h3>
+      <p>Import your Wealthsimple activity export (CSV) to see your deposits, trades, dividends, and fees here.</p>
+    </div> : <>
+      {accounts.length>1 && <div className="chips">
+        {[["all","All"],...accounts.map(a=>[a,a])].map(([k,l])=>
+          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+      </div>}
+
+      <div className="card alt">
+        <div className="stats3">
+          <div><div className="lbl">Net Deposited</div><b className="num">{fmt(Math.round(deposited))}</b></div>
+          <div><div className="lbl">Dividends</div><b className="num" style={{color:"var(--green)"}}>{fmt(Math.round(dividends))}</b></div>
+          <div><div className="lbl">Tax &amp; Fees</div><b className="num" style={{color:taxFees<0?"var(--red)":"var(--text)"}}>{fmt(Math.round(taxFees))}</b></div>
+        </div>
+      </div>
+
+      <div className="card">
+        {filtered.map(a=>{
+          const k = activityKey(a);
+          const c = activityColor(a);
+          return <div className="srow" key={k} style={{cursor:a.description?"pointer":"default"}}
+            onClick={()=>a.description && setOpen({...open,[k]:!open[k]})}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:9}}>
+                <b className="num">{activityLabel(a)}</b>
+                {a.account && <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",background:"var(--border)"}}>{a.account}</span>}
+              </div>
+              <div className="meta">{new Date(a.at).toLocaleDateString()} · {a.subType && a.subType!=="-" ? a.subType : a.type}
+                {a.quantity ? ` · ${a.quantity} sh` : ""}</div>
+              {open[k] && a.description && <div className="mut" style={{fontSize:11.5,marginTop:6,lineHeight:1.5}}>{a.description}</div>}
+            </div>
+            <div className="num" style={{fontWeight:700,color:c}}>{a.amount>=0?"+":""}{fmt(Math.round(a.amount))}</div>
+          </div>;
+        })}
+      </div>
+    </>}
+  </>;
+}
+
+/* ===== Screener ===== */
+function Screener({dispatch}) {
+  const [source,setSource] = useState("universe"); // "universe" | "highvolume"
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+  const [hv,setHv] = useState(null), [hvBusy,setHvBusy] = useState(false), [hvErr,setHvErr] = useState(null);
+  const [filter,setFilter] = useState("all");
+
+  useEffect(()=>{
+    let dead = false;
+    api("/api/screener").then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[]);
+
+  useEffect(()=>{
+    if (source!=="highvolume" || hv || hvBusy) return;
+    let dead = false;
+    setHvBusy(true);
+    api("/api/screener/high-volume").then(j=>{ if(!dead) setHv(j); })
+      .catch(e=>{ if(!dead) setHvErr(e.message); })
+      .finally(()=>{ if(!dead) setHvBusy(false); });
+    return ()=>{ dead = true; };
+  },[source]);
+
+  const universeRows = d ? [
+    ...(d.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"})),
+    ...(d.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"})),
+  ] : [];
+  const rows = source==="highvolume" ? (hv?.stocks||[]) : universeRows;
+  const filtered = filter==="all" ? rows : rows.filter(r=>r.signal===filter.toUpperCase());
+  const activeBusy = source==="highvolume" ? hvBusy : busy;
+  const activeErr = source==="highvolume" ? hvErr : err;
+  const note = source==="highvolume" ? hv?.universe_note : d?.universe_note;
+
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Screener</h1><div className="tag">Scanned candidates · buy & sell signals</div></div>
+
+    <div className="chips" style={{marginBottom:10}}>
+      {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"]].map(([k,l])=>
+        <div key={k} className={"chip"+(source===k?" on":"")} onClick={()=>setSource(k)}>{l}</div>)}
+    </div>
+
+    {activeBusy && <Spin t={source==="highvolume" ? "Fetching today's most active tickers…" : "Scanning universe…"}/>}
+    {activeErr && <div className="err"><b>Couldn't load screener</b>{activeErr}</div>}
+    {!activeBusy && !activeErr && (source==="highvolume" ? hv : d) && <>
+      {note && <p className="note" style={{marginTop:0}}>{note}</p>}
+      <div className="chips" style={{marginTop:14}}>
+        {[["all","All"],["buy","Buy"],["sell","Sell"]].map(([k,l])=>
+          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+      </div>
+      {filtered.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches this filter right now.</p></div> :
+        <div className="card">
+          {filtered.map(c=>{
+            const sc = SIG[c.signal] || "var(--amber)";
+            return <div className="srow" key={c.ticker} onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
+              <div style={{display:"flex",alignItems:"center",gap:10,flex:1}}>
+                <div className="dot" style={{background:sc,marginTop:0}}/>
+                <div>
+                  <b className="num">{c.ticker}</b>
+                  <div className="meta">RSI {c.rsi ?? "—"} · Vol {c.volume_ratio!=null?c.volume_ratio+"×":"—"}</div>
+                </div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div className="num">{c.price ?? "—"}</div>
+                {c.change_pct!=null && <div className="num" style={{fontSize:11,color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)}</div>}
+              </div>
+            </div>;
+          })}
+        </div>}
+      {source==="universe" ? (
+        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+          Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
+        </p>
+      ) : (
+        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+          {hv.stocks.length} tickers{hv.generated_at?` · ${new Date(hv.generated_at).toLocaleString()}`:""}{hv.cached?" · cached":""}
+        </p>
+      )}
+    </>}
+  </>;
+}
+
+/* ===== Learn — Stocks 101, plain-English accordion ===== */
+const LEARN_SECTIONS = [
+  {t:"What is a stock?", b:"A share of stock is a tiny slice of ownership in a company. Its price is simply whatever a buyer and seller last agreed it's worth — not a fixed value set by the company. That's why the same stock can trade at different prices minute to minute, even if nothing about the actual business changed."},
+  {t:"What actually moves the price?", b:"In the short term: supply and demand — more buyers than sellers pushes price up, and vice versa. What drives that demand includes earnings reports, news, interest rates, sector trends, and plain sentiment. In the long term, price tends to track the company's actual profits and growth. Short-term moves and long-term value can disagree for a long time before they converge."},
+  {t:"Technical analysis, in plain English", b:"Technical analysis studies price and volume patterns to gauge momentum — the idea being that crowd behavior leaves visible fingerprints on a chart. RSI measures how fast a price has moved recently. MACD compares a fast vs. slow moving average to gauge whether momentum is accelerating or fading. Volume shows how many people are actually behind a move. All of them describe what already happened, not what will happen next."},
+  {t:"Why volume matters", b:"A price move on heavy volume means lots of people participated — there's real conviction behind it. The same move on light volume can be noise, easily reversed. That's why this app reports volume as a separate conviction rating rather than folding it into Buy/Sell: volume tells you how much to trust a signal, not which direction it points."},
+  {t:"Reading fundamentals", b:"Market cap is the company's total value. P/E ratio compares price to earnings — a rough gauge of whether a stock is expensive relative to what it actually earns, though \"high\" varies wildly by industry. Beta measures how much the stock swings relative to the overall market: above 1 means more volatile, below 1 means steadier. The 52-week range shows where today's price sits versus the past year."},
+  {t:"Why news sentiment matters", b:"Markets often react to how a story is perceived before the real business impact is known — a single bad headline can move a price in minutes. This app runs recent headlines through FinBERT, an AI model trained specifically on financial language, so it understands that \"beats estimates\" is bullish and \"misses guidance\" is bearish in ways a general model wouldn't. Still, five headlines are a small sample."},
+  {t:"Risk management 101", b:"A stop-loss caps how much you're willing to lose if a trade goes wrong. A take-profit defines what \"it worked\" looks like. The ratio between them — reward-to-risk — tells you how much you stand to gain versus what you're risking. A 2:1 ratio means you can be wrong more often than you're right and still come out ahead, which is why traders often care more about that ratio than about being right."},
+  {t:"What this app doesn't do", b:"It doesn't evaluate whether a business is actually healthy (revenue trends, debt, competitive position), doesn't account for macroeconomic conditions, and doesn't know your personal financial situation or risk tolerance. It combines narrow signals mechanically. Useful as one input among many — not a substitute for research, and nothing here is financial advice."},
+];
+
+function Learn() {
+  const [open,setOpen] = useState({0:true});
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Learn</h1><div className="tag">Stocks 101 · plain-English basics</div></div>
+    {LEARN_SECTIONS.map((s,i)=>{
+      const o = !!open[i];
+      return <div key={i} className="card" style={{borderColor:o?"rgba(79,168,130,.27)":"var(--border)",cursor:"pointer"}}
+        onClick={()=>setOpen({...open,[i]:!o})}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <b style={{fontSize:14}}>{s.t}</b>
+          <span style={{fontSize:14,color:o?"var(--green)":"var(--faint)"}}>{o?"▲":"▼"}</span>
+        </div>
+        {o && <p className="mut" style={{marginTop:8,lineHeight:1.55}}>{s.b}</p>}
+      </div>;
+    })}
+  </>;
+}
+
+/* ===== Settings ===== */
+function Settings() {
+  const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
+  const [currency,setCurrency] = useState(()=>store.get("ma_currency","CAD"));
+
+  const setRiskP = r => { setRisk(r); store.set("ma_risk_pct", r); };
+  const setCur = c => { setCurrency(c); store.set("ma_currency", c); };
+
+  return <>
+    <div style={{margin:"22px 0 16px"}}><h1>Settings</h1><div className="tag">Defaults for this device</div></div>
+    <div className="card">
+      <h2>Default risk per trade</h2>
+      <p className="mut" style={{marginBottom:12}}>Sets the starting risk % in the position-sizing calculator on Analyze.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {[0.5,1,2,3].map(r=><div key={r} className={"chip"+(risk===r?" on":"")} onClick={()=>setRiskP(r)}>{r}%</div>)}
+      </div>
+    </div>
+    <div className="card">
+      <h2>Display currency</h2>
+      <p className="mut" style={{marginBottom:12}}>Preferred currency for figures this app doesn't otherwise infer from the ticker itself.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {["CAD","USD"].map(c=><div key={c} className={"chip"+(currency===c?" on":"")} onClick={()=>setCur(c)}>{c}</div>)}
+      </div>
+    </div>
+    <p className="note">Saved on this device only — nothing here is sent anywhere.</p>
+  </>;
+}
+
 /* ===== Log decision modal ===== */
 function LogModal({data, onSave, onClose}) {
   const [act,setAct] = useState(null), [note,setNote] = useState("");
@@ -1280,6 +1703,7 @@ function App() {
   const [holdings,setHoldings] = useState(()=>store.get("ma_portfolio",[]));
   const [cash,setCash] = useState(()=>store.get("ma_cash",0));
   const [journal,setJournal] = useState(()=>store.get("ma_journal",[]));
+  const [activity,setActivity] = useState(()=>store.get("ma_activity",[]));
   const [portfolioValue,setPV] = useState(0);
   const [logOpen,setLogOpen] = useState(false);
 
@@ -1304,26 +1728,32 @@ function App() {
       case "holdings": setHoldings(a.v); store.set("ma_portfolio",a.v); break;
       case "cash": setCash(a.v); store.set("ma_cash",a.v); break;
       case "journal": setJournal(a.v); store.set("ma_journal",a.v); break;
+      case "activity": setActivity(a.v); store.set("ma_activity",a.v); break;
       case "pv": setPV(a.v); break;
       case "logOpen": setLogOpen(true); break;
     }
   },[watchlist,analyze]);
 
-  const state = {q,data,busy,err,watchlist,holdings,cash,journal,portfolioValue,
+  const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,
     scanTickers,setScanTickers:setScanTickersPersist};
 
   return <>
     <header><div className="hdr">
       <div className="logo"><Logo/></div>
       <div><h1>Market Analyzer</h1><div className="tag">Measured signals · not predictions</div></div>
-      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["brief","Brief"],["journal","Journal"]].map(([k,l])=>
+      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["activity","Activity"],["brief","Brief"],["journal","Journal"],
+        ["screener","Screener"],["learn","Learn"],["settings","Settings"]].map(([k,l])=>
         <button key={k} className={tab===k?"on":""} onClick={()=>setTab(k)}>{l}</button>)}</nav>
     </div></header>
     <div className="wrap">
       {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
       {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
+      {tab==="activity" && <Activity state={state} dispatch={dispatch}/>}
       {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
       {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
+      {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
+      {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
+      {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
     </div>
     {logOpen && data && <LogModal data={data} onClose={()=>setLogOpen(false)}
       onSave={e=>{ const n=[e,...journal]; setJournal(n); store.set("ma_journal",n); setLogOpen(false);

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -137,6 +138,12 @@ _SCREENER_TTL_SECONDS = 3600  # 1 hour — screening is not a minute-to-minute a
 
 _UNDER20_CACHE: Dict[str, Tuple[float, Any]] = {}
 _UNDER20_TTL_SECONDS = 3600
+
+# The "most actives" list shifts through the trading day but not second to
+# second — 15 minutes keeps this responsive without hammering Yahoo's
+# screener endpoint on every app open.
+_HIGH_VOLUME_CACHE: Dict[str, Tuple[float, Any]] = {}
+_HIGH_VOLUME_TTL_SECONDS = 900
 
 # USD/CAD barely moves minute to minute — cache aggressively.
 _FX_CACHE: Dict[str, Tuple[float, float]] = {}
@@ -342,10 +349,18 @@ class ScreenerResponse(BaseModel):
     cached: bool = False
 
 
+class HighVolumeResponse(BaseModel):
+    stocks: List[ScreenerHit]
+    universe_note: str
+    generated_at: str
+    cached: bool = False
+
+
 class PortfolioHolding(BaseModel):
     ticker: str
     shares: float
     cost_basis: float  # average price paid per share
+    account: Optional[str] = None  # e.g. "TFSA", "FHSA", "Non-Registered" — display/grouping only
 
 
 class PortfolioRequest(BaseModel):
@@ -356,6 +371,7 @@ class HoldingResult(BaseModel):
     ticker: str
     shares: float
     cost_basis: float
+    account: Optional[str] = None
     current_price: Optional[float]
     currency: str
     market_value: Optional[float]
@@ -439,6 +455,8 @@ def detect_market(ticker: str) -> str:
         return "TSX-V"
     if t.endswith(".CN"):
         return "CSE"
+    if t.endswith(".NE"):
+        return "NEO"
     return "US"
 
 
@@ -1094,15 +1112,13 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
 
     for t in tickers:
         try:
-            # Multi-ticker downloads come back with a per-ticker column level;
-            # a single-ticker download comes back flat.
-            if len(tickers) == 1:
-                df = raw
-            else:
-                if t not in raw.columns.get_level_values(0):
-                    results[t] = {"error": "No data found for this ticker."}
-                    continue
-                df = raw[t]
+            # yf.download() always returns a per-ticker column level (a
+            # MultiIndex keyed by ticker), even when only one ticker was
+            # requested, since multi_level_index isn't set to False above.
+            if t not in raw.columns.get_level_values(0):
+                results[t] = {"error": "No data found for this ticker."}
+                continue
+            df = raw[t]
 
             df = df.dropna(how="all")
             if df.empty or len(df) < 30:
@@ -1234,6 +1250,121 @@ def run_under20_screener(force: bool = False) -> ScreenerResponse:
     return response
 
 
+def fetch_high_volume_tickers(us_count: int = 15, ca_count: int = 5) -> List[str]:
+    """
+    Today's actual highest-volume tickers, live from Yahoo — both US and
+    Canadian markets, deliberately NOT limited to SCREENER_UNIVERSE, so names
+    outside this app's fixed scan list still show up here when they're
+    genuinely trading heavy volume today.
+
+    Two separate queries, not one combined sort: Yahoo's predefined
+    "most_actives" screen only covers US-region tickers, and US mega-cap
+    share volume (hundreds of millions of shares/day) would swamp every
+    Canadian name if ranked together on raw share volume. The Canadian
+    query uses its own, much lower volume/market-cap thresholds — TSX/TSX-V
+    liquidity is a different scale entirely.
+    """
+    def fetch_us() -> List[str]:
+        result = yf.screen("most_actives", count=us_count)
+        quotes = (result or {}).get("quotes", [])
+        # yf.screen() internally defaults 'count' to 25 for custom queries
+        # regardless of what's passed (see fetch_ca below) — slice locally
+        # rather than trust the API to honor the requested size.
+        return [q["symbol"] for q in quotes if q.get("symbol")][:us_count]
+
+    def fetch_ca() -> List[str]:
+        ca_query = yf.EquityQuery("and", [
+            yf.EquityQuery("eq", ["region", "ca"]),
+            yf.EquityQuery("gte", ["intradaymarketcap", 300_000_000]),
+            yf.EquityQuery("gt", ["dayvolume", 300_000]),
+        ])
+        # Custom (non-predefined) queries are documented to take `size`, but
+        # yf.screen() still fills an unset `count` with its own default (25)
+        # and sends both fields — pass count too and slice locally either way,
+        # since which one Yahoo's endpoint actually honors isn't documented.
+        result = yf.screen(ca_query, sortField="dayvolume", sortAsc=False, size=ca_count, count=ca_count)
+        quotes = (result or {}).get("quotes", [])
+        return [q["symbol"] for q in quotes if q.get("symbol")][:ca_count]
+
+    tickers: List[str] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        us_future = pool.submit(fetch_us)
+        ca_future = pool.submit(fetch_ca)
+        try:
+            tickers.extend(us_future.result())
+        except Exception as e:
+            logger.warning(f"US high-volume screen fetch failed: {e}")
+        try:
+            tickers.extend(ca_future.result())
+        except Exception as e:
+            logger.warning(f"Canadian high-volume screen fetch failed: {e}")
+
+    return tickers
+
+
+def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
+    if not force:
+        cached = _HIGH_VOLUME_CACHE.get("high_volume")
+        if cached and time.time() - cached[0] < _HIGH_VOLUME_TTL_SECONDS:
+            payload = cached[1]
+            return HighVolumeResponse(**{**payload, "cached": True})
+
+    tickers = fetch_high_volume_tickers()
+    if not tickers:
+        return HighVolumeResponse(
+            stocks=[],
+            universe_note="Could not fetch today's high-volume list from Yahoo right now — try again shortly.",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            cached=False,
+        )
+
+    scored = batch_score(tickers)
+    # Preserve Yahoo's own volume-descending order rather than re-sorting by
+    # conviction — the point of this panel is the volume ranking itself.
+    stocks = [
+        ScreenerHit(**scored[t])
+        for t in tickers
+        if scored.get(t) and not scored[t].get("error") and scored[t].get("price") is not None
+    ]
+
+    if not stocks:
+        # batch_score() failed for every ticker (rate limit / network blip on
+        # the price-history call, separate from the screen call above) —
+        # don't cache an empty "success" that would hide the failure for the
+        # full TTL, same as the empty-ticker-list guard above.
+        return HighVolumeResponse(
+            stocks=[],
+            universe_note="Could not score today's high-volume tickers right now — try again shortly.",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            cached=False,
+        )
+
+    # One region's fetch can fail while the other succeeds (fetch_high_volume_tickers
+    # logs but doesn't raise) — say so rather than claiming full US+CA coverage
+    # when the result is actually one-sided.
+    has_us = any(not t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
+    has_ca = any(t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
+    if has_us and has_ca:
+        markets_note = "Today's highest-volume US and Canadian tickers"
+    elif has_us:
+        markets_note = "Today's highest-volume US tickers (Canadian data was unavailable this refresh)"
+    else:
+        markets_note = "Today's highest-volume Canadian tickers (US data was unavailable this refresh)"
+
+    response = HighVolumeResponse(
+        stocks=stocks,
+        universe_note=(
+            f"{markets_note} on Yahoo Finance, refreshed live every 15 minutes — not the "
+            "fixed scan list used elsewhere, so names can appear here even if you've never "
+            "added or scanned them before."
+        ),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        cached=False,
+    )
+    _HIGH_VOLUME_CACHE["high_volume"] = (time.time(), response.model_dump())
+    return response
+
+
 def describe_holding_context(pl_pct: Optional[float], signal: str) -> str:
     """
     Frames what the indicators say against the position's P/L, without telling
@@ -1299,7 +1430,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
     for h in holdings:
         t = h.ticker.strip().upper()
         r = scored.get(t, {})
-        currency = "CAD" if t.endswith((".TO", ".V", ".CN")) else "USD"
+        currency = "CAD" if t.endswith((".TO", ".V", ".CN", ".NE")) else "USD"
         fx = usd_cad_rate if (currency == "USD" and usd_cad_rate) else 1.0
 
         cost_native = h.shares * h.cost_basis
@@ -1308,7 +1439,7 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
         if r.get("error") or r.get("price") is None:
             results.append(
                 HoldingResult(
-                    ticker=t, shares=h.shares, cost_basis=h.cost_basis,
+                    ticker=t, shares=h.shares, cost_basis=h.cost_basis, account=h.account,
                     current_price=None, currency=currency, market_value=None,
                     unrealized_pl=None, unrealized_pl_pct=None,
                     day_pl=None, day_pl_pct=None,
@@ -1329,14 +1460,14 @@ def analyze_portfolio(holdings: List[PortfolioHolding]) -> PortfolioResponse:
 
         change_pct = r.get("change_pct")
         day_pl_native = None
-        if change_pct is not None and price:
+        if change_pct is not None and change_pct > -100 and price:
             prev_close = price / (1 + change_pct / 100)
             day_pl_native = round(h.shares * (price - prev_close), 2)
             total_day_pl_cad += day_pl_native * fx
 
         results.append(
             HoldingResult(
-                ticker=t, shares=h.shares, cost_basis=h.cost_basis,
+                ticker=t, shares=h.shares, cost_basis=h.cost_basis, account=h.account,
                 current_price=price, currency=currency,
                 market_value=round(value_native, 2),
                 unrealized_pl=round(pl_native, 2), unrealized_pl_pct=pl_pct,
@@ -1511,7 +1642,7 @@ def analyze(ticker: str):
         info = {}
 
     company_name = info.get("longName") or info.get("shortName") or ticker
-    currency = info.get("currency") or ("CAD" if ticker.endswith((".TO", ".V", ".CN")) else "USD")
+    currency = info.get("currency") or ("CAD" if ticker.endswith((".TO", ".V", ".CN", ".NE")) else "USD")
 
     close = hist["Close"]
     current_price = round(float(close.iloc[-1]), 2)
@@ -1584,7 +1715,7 @@ def analyze(ticker: str):
         # underlying's own track record is the relevant one to check.
         technical = apply_track_record(technical, underlying["ticker"])
 
-    regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN")))
+    regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN", ".NE")))
     earnings = fetch_earnings(stock)
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
@@ -1627,6 +1758,12 @@ def screener(force: bool = False):
 def screener_under20(force: bool = False):
     """Canadian stocks under CAD $20, screened for current momentum signals."""
     return run_under20_screener(force=force)
+
+
+@app.get("/api/screener/high-volume", response_model=HighVolumeResponse)
+def screener_high_volume(force: bool = False):
+    """Today's 20 highest-volume US and Canadian tickers, live — not limited to SCREENER_UNIVERSE."""
+    return run_high_volume_screener(force=force)
 
 
 HISTORY_RANGES = {
@@ -2251,7 +2388,7 @@ def _prepare_indicator_frame(ticker: str, period: str) -> pd.DataFrame:
     # Relative strength vs a market benchmark (S&P 500 for US names, TSX for
     # Canadian). One extra request per comparison — acceptable here since this
     # is an on-demand analysis, not something the screener runs in bulk.
-    benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN")) else "^GSPC"
+    benchmark_symbol = "^GSPTSE" if ticker.upper().endswith((".TO", ".V", ".CN", ".NE")) else "^GSPC"
     benchmark = _get_benchmark(benchmark_symbol, period)
     df["rel_strength"] = _relative_strength(close, benchmark)
 
@@ -3110,7 +3247,7 @@ def quotes(tickers: str = ""):
         if cached and now - cached[0] < _QUOTES_TTL_SECONDS:
             results.append(Quote(
                 ticker=s, price=cached[1],
-                currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+                currency="CAD" if s.endswith((".TO", ".V", ".CN", ".NE")) else "USD",
             ))
         else:
             fresh_needed.append(s)
@@ -3121,12 +3258,14 @@ def quotes(tickers: str = ""):
                               group_by="ticker", progress=False, threads=True)
             for s in fresh_needed:
                 try:
-                    series = raw[s]["Close"] if len(fresh_needed) > 1 else raw["Close"]
+                    # yf.download() always returns a per-ticker column level
+                    # (a MultiIndex keyed by ticker), even for a single ticker.
+                    series = raw[s]["Close"]
                     price = round(float(series.dropna().iloc[-1]), 2)
                     _QUOTES_CACHE[s] = (now, price)
                     results.append(Quote(
                         ticker=s, price=price,
-                        currency="CAD" if s.endswith((".TO", ".V", ".CN")) else "USD",
+                        currency="CAD" if s.endswith((".TO", ".V", ".CN", ".NE")) else "USD",
                     ))
                 except Exception:
                     results.append(Quote(ticker=s, price=None, currency="USD", error="No data"))
