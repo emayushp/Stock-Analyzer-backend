@@ -851,33 +851,41 @@ def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
     Next earnings date plus the last few quarters' EPS estimate vs. actual.
     Coverage varies a lot by ticker — especially thinner for smaller Canadian
     names — so this degrades gracefully to "not available" rather than error.
+
+    Deliberately NOT using yfinance's get_earnings_dates(): that method HTML-
+    scrapes Yahoo's calendar page, which yfinance's own source notes Yahoo
+    stopped keeping current ("reverting to scraping HTML" after the proper
+    endpoint broke) — in practice it was returning nothing for most tickers,
+    well-covered large-caps included. `calendar` and `get_earnings_history()`
+    hit Yahoo's quoteSummary JSON API instead, same as fundamentals/info
+    elsewhere in this file, and are far more reliable.
     """
     fallback = EarningsInfo(
         next_earnings_date=None, recent_quarters=[],
         note="Earnings data isn't available for this ticker.",
     )
-    try:
-        df = stock.get_earnings_dates(limit=8)
-    except Exception as e:
-        logger.info(f"Earnings fetch skipped: {e}")
-        return fallback
 
-    if df is None or df.empty:
-        return fallback
+    def fetch_next_date():
+        cal = stock.calendar or {}
+        # yfinance builds these dates with datetime.fromtimestamp() (naive,
+        # server-local time) — compare against a local-time "today" too,
+        # rather than UTC, so the two sides can't disagree near midnight.
+        today = datetime.now().date()
+        upcoming = [d for d in (cal.get("Earnings Date") or []) if d and d >= today]
+        return min(upcoming).strftime("%Y-%m-%d") if upcoming else None
 
-    try:
-        now = pd.Timestamp.now(tz=df.index.tz) if df.index.tz is not None else pd.Timestamp.now()
-        upcoming = df[df.index > now]
-        past = df[df.index <= now].sort_index(ascending=False)
-
-        next_date = upcoming.index.min().strftime("%Y-%m-%d") if not upcoming.empty else None
-
-        quarters = []
-        for idx, row in past.head(4).iterrows():
-            est = row.get("EPS Estimate")
-            act = row.get("Reported EPS")
-            surprise = row.get("Surprise(%)")
-            quarters.append(
+    def fetch_quarters():
+        df = stock.get_earnings_history()
+        if df is None or df.empty:
+            return []
+        result = []
+        for idx, row in df.sort_index(ascending=False).head(4).iterrows():
+            if pd.isna(idx):
+                continue  # Yahoo occasionally omits a quarter's date; skip rather than abort the rest
+            est = row.get("epsEstimate")
+            act = row.get("epsActual")
+            surprise = row.get("surprisePercent")
+            result.append(
                 EarningsQuarter(
                     date=idx.strftime("%Y-%m-%d"),
                     eps_estimate=round(float(est), 2) if pd.notna(est) else None,
@@ -885,15 +893,33 @@ def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
                     surprise_pct=round(float(surprise), 2) if pd.notna(surprise) else None,
                 )
             )
+        return result
 
-        return EarningsInfo(
-            next_earnings_date=next_date,
-            recent_quarters=quarters,
-            note="Beat = actual EPS came in above analyst estimates; miss = below. Large surprises often move price sharply on the report date.",
-        )
-    except Exception as e:
-        logger.warning(f"Earnings parsing failed: {e}")
+    next_date = None
+    quarters = []
+    # Two independent quoteSummary round trips — run concurrently rather than
+    # doubling this function's latency, matching the pattern already used
+    # for the high-volume screener's US/CA fetches.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        date_future = pool.submit(fetch_next_date)
+        quarters_future = pool.submit(fetch_quarters)
+        try:
+            next_date = date_future.result()
+        except Exception as e:
+            logger.info(f"Earnings calendar fetch failed: {e}")
+        try:
+            quarters = quarters_future.result()
+        except Exception as e:
+            logger.info(f"Earnings history fetch failed: {e}")
+
+    if next_date is None and not quarters:
         return fallback
+
+    return EarningsInfo(
+        next_earnings_date=next_date,
+        recent_quarters=quarters,
+        note="Beat = actual EPS came in above analyst estimates; miss = below. Large surprises often move price sharply on the report date.",
+    )
 
 
 def build_fundamentals(info: dict, current_price: Optional[float]) -> Fundamentals:
