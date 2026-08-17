@@ -1546,19 +1546,11 @@ function Journal({state, dispatch}) {
 }
 
 /* ===== Activity — imported Wealthsimple transaction history ===== */
-const ACT_LABEL = { MoneyMovement:"Transfer", Dividend:"Dividend", Tax:"Tax", Fee:"Fee" };
-function activityLabel(a) { return a.ticker || ACT_LABEL[a.type] || a.type || "Activity"; }
-function activityColor(a) {
-  if (a.type === "MoneyMovement") return "var(--muted)";
-  return a.amount >= 0 ? "var(--green)" : "var(--red)";
-}
-
 function Activity({state, dispatch}) {
   const {activity} = state;
   const fileRef = useRef(null);
   const [importMsg,setImportMsg] = useState(null);
   const [filter,setFilter] = useState("all");
-  const [open,setOpen] = useState({});
   const [showByTicker,setShowByTicker] = useState(false);
 
   const accounts = [...new Set(activity.map(a=>a.account).filter(Boolean))];
@@ -1581,15 +1573,14 @@ function Activity({state, dispatch}) {
   };
 
   const filtered = filter === "all" ? activity : activity.filter(a=>a.account === filter);
-  const sum = pred => filtered.filter(pred).reduce((s,a)=>s+a.amount, 0);
-  const deposited = sum(a=>a.type === "MoneyMovement");
-  const dividends = sum(a=>a.type === "Dividend");
-  const taxFees = sum(a=>a.type === "Tax" || a.type === "Fee");
   const pl = computeRealizedPL(filtered);
+  // Closed round-trips only — no deposits, dividends, tax/fees, and no
+  // still-open buys (nothing to pair those with yet, so no profit to show).
+  const closedTrades = buildActivityFeed(filtered).filter(a=>a.closedTrade);
 
   return <>
     <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
-      <div style={{flex:1}}><h1>Activity</h1><div className="tag">Imported deposits · trades · dividends</div></div>
+      <div style={{flex:1}}><h1>Activity</h1><div className="tag">Closed trades · buy vs sell</div></div>
       <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
       <button className="btn sm ghost" onClick={()=>fileRef.current.click()}>Import from Wealthsimple (CSV)</button>
     </div>
@@ -1600,7 +1591,7 @@ function Activity({state, dispatch}) {
 
     {!activity.length ? <div className="center">
       <h3>No activity imported yet</h3>
-      <p>Import your Wealthsimple activity export (CSV) to see your deposits, trades, dividends, and fees here.</p>
+      <p>Import your Wealthsimple activity export (CSV) to see closed trades — buy price, sell price, and profit — here.</p>
     </div> : <>
       {accounts.length>1 && <div className="chips">
         {[["all","All"],...accounts.map(a=>[a,a])].map(([k,l])=>
@@ -1613,8 +1604,7 @@ function Activity({state, dispatch}) {
           {pl.total>=0?"+":""}{fmt(Math.round(pl.total*100)/100)}
         </div>
         <p className="mut" style={{fontSize:12,marginTop:8}}>
-          Matches buys against sells per ticker (and account), using running average cost —
-          dividends, tax, and fees aren't included.
+          Matches buys against sells per ticker (and account), using running average cost.
         </p>
         {pl.incomplete && <p className="mut" style={{fontSize:12,color:"var(--amber)",marginTop:4}}>
           Some sales are for more shares than this import ever recorded buying — likely bought
@@ -1636,65 +1626,43 @@ function Activity({state, dispatch}) {
         </>}
       </div>
 
-      <div className="card alt">
-        <div className="stats3">
-          <div><div className="lbl">Net Deposited</div><b className="num">{fmt(Math.round(deposited))}</b></div>
-          <div><div className="lbl">Dividends</div><b className="num" style={{color:"var(--green)"}}>{fmt(Math.round(dividends))}</b></div>
-          <div><div className="lbl">Tax &amp; Fees</div><b className="num" style={{color:taxFees<0?"var(--red)":"var(--text)"}}>{fmt(Math.round(taxFees))}</b></div>
-        </div>
-      </div>
-
-      <div className="card">
-        {buildActivityFeed(filtered).map(a=>{
-          if (a.closedTrade) {
-            const k = `closed__${a.ticker}__${a.account||""}__${a.episodeIndex}`;
-            const knownCost = a.profit != null;
-            const c = !knownCost ? "var(--amber)" : a.profit>=0 ? "var(--green)" : "var(--red)";
-            return <div className="srow" key={k}>
-              <div style={{flex:1}}>
-                <div style={{display:"flex",alignItems:"center",gap:9}}>
-                  <b className="num">{a.ticker}</b>
-                  {a.account && <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",background:"var(--border)"}}>{a.account}</span>}
-                  <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{a.shares} sh</span>
-                </div>
-                <div className="meta">
-                  Bought {a.avgBuy!=null ? fmt(Math.round(a.avgBuy*100)/100) : "—"} → Sold {a.avgSell!=null ? fmt(Math.round(a.avgSell*100)/100) : "—"}
-                  {" · "}{new Date(a.buyAt).toLocaleDateString()}–{new Date(a.sellAt).toLocaleDateString()}
-                </div>
-                {!knownCost ? (
-                  <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
-                    No matching buy in this import — cost basis unknown, so this isn't a known
-                    profit, just the sale proceeds. Likely bought before your export's date range.
-                  </div>
-                ) : a.incomplete && (
-                  <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
-                    Sold more than this import recorded buying — buy price may be incomplete.
-                  </div>
-                )}
-              </div>
-              <div className="num" style={{fontWeight:700,color:c}}>
-                {!knownCost ? fmt(Math.round(a.sellProceeds*100)/100) :
-                  `${a.profit>=0?"+":""}${fmt(Math.round(a.profit*100)/100)}`}
-              </div>
-            </div>;
-          }
-          const k = activityKey(a);
-          const c = activityColor(a);
-          return <div className="srow" key={k} style={{cursor:a.description?"pointer":"default"}}
-            onClick={()=>a.description && setOpen({...open,[k]:!open[k]})}>
+      {closedTrades.length===0 ? <div className="center">
+        <h3>No closed trades yet</h3>
+        <p>A trade shows up here once a position is fully bought and then fully sold.</p>
+      </div> : <div className="card">
+        {closedTrades.map(a=>{
+          const k = `closed__${a.ticker}__${a.account||""}__${a.episodeIndex}`;
+          const knownCost = a.profit != null;
+          const c = !knownCost ? "var(--amber)" : a.profit>=0 ? "var(--green)" : "var(--red)";
+          return <div className="srow" key={k}>
             <div style={{flex:1}}>
               <div style={{display:"flex",alignItems:"center",gap:9}}>
-                <b className="num">{activityLabel(a)}</b>
+                <b className="num">{a.ticker}</b>
                 {a.account && <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",background:"var(--border)"}}>{a.account}</span>}
+                <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{a.shares} sh</span>
               </div>
-              <div className="meta">{new Date(a.at).toLocaleDateString()} · {a.subType && a.subType!=="-" ? a.subType : a.type}
-                {a.quantity ? ` · ${a.quantity} sh` : ""}</div>
-              {open[k] && a.description && <div className="mut" style={{fontSize:11.5,marginTop:6,lineHeight:1.5}}>{a.description}</div>}
+              <div className="meta">
+                Bought {a.avgBuy!=null ? fmt(Math.round(a.avgBuy*100)/100) : "—"} → Sold {a.avgSell!=null ? fmt(Math.round(a.avgSell*100)/100) : "—"}
+                {" · "}{new Date(a.buyAt).toLocaleDateString()}–{new Date(a.sellAt).toLocaleDateString()}
+              </div>
+              {!knownCost ? (
+                <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
+                  No matching buy in this import — cost basis unknown, so this isn't a known
+                  profit, just the sale proceeds. Likely bought before your export's date range.
+                </div>
+              ) : a.incomplete && (
+                <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
+                  Sold more than this import recorded buying — buy price may be incomplete.
+                </div>
+              )}
             </div>
-            <div className="num" style={{fontWeight:700,color:c}}>{a.amount>=0?"+":""}{fmt(Math.round(a.amount))}</div>
+            <div className="num" style={{fontWeight:700,color:c}}>
+              {!knownCost ? fmt(Math.round(a.sellProceeds*100)/100) :
+                `${a.profit>=0?"+":""}${fmt(Math.round(a.profit*100)/100)}`}
+            </div>
           </div>;
         })}
-      </div>
+      </div>}
     </>}
   </>;
 }
