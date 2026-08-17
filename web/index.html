@@ -289,25 +289,38 @@ function mergeActivities(existing, imported) {
   return [...added, ...existing].sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
+// Shared by computeRealizedPL and buildActivityFeed so the two can't drift:
+// what counts as a matchable trade fill, and how fills get grouped into
+// per-ticker-per-account, chronologically-ordered lots to walk through.
+// Quantity 0/NaN rows (shouldn't normally occur, but don't trust the CSV
+// blindly) are treated as non-trades so they still show up as raw rows
+// rather than silently vanishing.
+function isMatchableTrade(a) {
+  return (a.type || "").toLowerCase() === "trade" && a.ticker && Number.isFinite(a.quantity) && a.quantity !== 0;
+}
+function groupTradesByTickerAccount(activities) {
+  const groups = new Map();
+  for (const a of activities.filter(isMatchableTrade)) {
+    const key = `${a.ticker}__${a.account || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  for (const rows of groups.values()) rows.sort((x, y) => new Date(x.at) - new Date(y.at));
+  return groups;
+}
+
 // Realized trading P/L: match BUY quantity against SELL quantity per
 // ticker+account, using running average cost — the same convention the rest
 // of this app already uses for cost basis (matches Wealthsimple's own "Book
 // Value" figures and Canadian ACB, not FIFO lot-matching). Dividends/tax/fees
 // are deliberately excluded — this is purely buy-vs-sell trading P/L.
 function computeRealizedPL(activities) {
-  const groups = new Map();
-  for (const a of activities) {
-    if ((a.type || "").toLowerCase() !== "trade" || !a.ticker || a.quantity == null) continue;
-    const key = `${a.ticker}__${a.account || ""}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(a);
-  }
+  const groups = groupTradesByTickerAccount(activities);
 
   let total = 0;
   let incomplete = false;
   const byTicker = [];
-  for (const [key, rows] of groups) {
-    const sorted = [...rows].sort((x, y) => new Date(x.at) - new Date(y.at));
+  for (const [key, sorted] of groups) {
     let shares = 0, cost = 0, realized = 0;
     for (const a of sorted) {
       if (a.quantity > 0) {
@@ -329,6 +342,65 @@ function computeRealizedPL(activities) {
   }
   byTicker.sort((a, b) => b.realized - a.realized);
   return { total, byTicker, incomplete };
+}
+
+// Collapses a matched buy(s)+sell(s) round-trip — for one ticker+account,
+// from flat back to flat — into a single closed-trade entry showing the
+// average buy price, average sell price, and profit, instead of listing
+// each fill as its own row. A position that's still open (bought but not
+// fully sold) is left as individual rows, since there's no sell yet to
+// pair it with. Deposits/dividends/tax/fees are untouched. Web-only by
+// request — the mobile app keeps its raw per-fill ledger.
+function buildActivityFeed(activities) {
+  const feedRows = activities.filter((a) => !isMatchableTrade(a));
+  const groups = groupTradesByTickerAccount(activities);
+
+  for (const [key, sorted] of groups) {
+    const [ticker, account] = key.split("__");
+    let shares = 0;
+    let episode = [];
+    let episodeIndex = 0;
+
+    for (const a of sorted) {
+      episode.push(a);
+      if (a.quantity > 0) {
+        shares += a.quantity;
+      } else if (a.quantity < 0) {
+        shares = Math.max(0, shares + a.quantity); // quantity already negative
+        if (shares <= 0.0001) {
+          const buys = episode.filter((r) => r.quantity > 0);
+          const sells = episode.filter((r) => r.quantity < 0);
+          const buyShares = buys.reduce((s, b) => s + b.quantity, 0);
+          const buyCost = buys.reduce((s, b) => s - b.amount, 0);
+          const sellShares = sells.reduce((s, b) => s - b.quantity, 0);
+          const sellProceeds = sells.reduce((s, b) => s + b.amount, 0);
+          const avgBuy = buyShares > 0 ? buyCost / buyShares : null;
+          const avgSell = sellShares > 0 ? sellProceeds / sellShares : null;
+          const matched = Math.round(Math.min(buyShares, sellShares) * 10000) / 10000;
+          // A sell with no matched buy at all (avgBuy null) isn't a known
+          // profit — it's proceeds against an unknown cost basis, most often
+          // because the position was opened before this import's date range.
+          const knownCost = avgBuy != null;
+          const profit = knownCost ? sellProceeds - avgBuy * matched : null;
+          feedRows.push({
+            closedTrade: true, ticker, account: account || null,
+            episodeIndex: episodeIndex++,
+            shares: matched, avgBuy, avgSell, profit, sellProceeds,
+            buyAt: buys.length ? buys[0].at : sells[0].at,
+            sellAt: sells[sells.length - 1].at,
+            at: sells[sells.length - 1].at, // drives chronological sort below
+            incomplete: sellShares > buyShares + 0.0001,
+          });
+          episode = [];
+        }
+      }
+    }
+    // Left open (bought but never fully sold, or a trailing partial after
+    // the last close) — no sell to pair with, so keep these as raw rows.
+    feedRows.push(...episode);
+  }
+
+  return feedRows.sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
 async function api(path, opts) {
@@ -1573,7 +1645,39 @@ function Activity({state, dispatch}) {
       </div>
 
       <div className="card">
-        {filtered.map(a=>{
+        {buildActivityFeed(filtered).map(a=>{
+          if (a.closedTrade) {
+            const k = `closed__${a.ticker}__${a.account||""}__${a.episodeIndex}`;
+            const knownCost = a.profit != null;
+            const c = !knownCost ? "var(--amber)" : a.profit>=0 ? "var(--green)" : "var(--red)";
+            return <div className="srow" key={k}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:9}}>
+                  <b className="num">{a.ticker}</b>
+                  {a.account && <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",background:"var(--border)"}}>{a.account}</span>}
+                  <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{a.shares} sh</span>
+                </div>
+                <div className="meta">
+                  Bought {a.avgBuy!=null ? fmt(Math.round(a.avgBuy*100)/100) : "—"} → Sold {a.avgSell!=null ? fmt(Math.round(a.avgSell*100)/100) : "—"}
+                  {" · "}{new Date(a.buyAt).toLocaleDateString()}–{new Date(a.sellAt).toLocaleDateString()}
+                </div>
+                {!knownCost ? (
+                  <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
+                    No matching buy in this import — cost basis unknown, so this isn't a known
+                    profit, just the sale proceeds. Likely bought before your export's date range.
+                  </div>
+                ) : a.incomplete && (
+                  <div className="mut" style={{fontSize:11,color:"var(--amber)",marginTop:4}}>
+                    Sold more than this import recorded buying — buy price may be incomplete.
+                  </div>
+                )}
+              </div>
+              <div className="num" style={{fontWeight:700,color:c}}>
+                {!knownCost ? fmt(Math.round(a.sellProceeds*100)/100) :
+                  `${a.profit>=0?"+":""}${fmt(Math.round(a.profit*100)/100)}`}
+              </div>
+            </div>;
+          }
           const k = activityKey(a);
           const c = activityColor(a);
           return <div className="srow" key={k} style={{cursor:a.description?"pointer":"default"}}
