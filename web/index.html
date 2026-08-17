@@ -289,6 +289,48 @@ function mergeActivities(existing, imported) {
   return [...added, ...existing].sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
+// Realized trading P/L: match BUY quantity against SELL quantity per
+// ticker+account, using running average cost — the same convention the rest
+// of this app already uses for cost basis (matches Wealthsimple's own "Book
+// Value" figures and Canadian ACB, not FIFO lot-matching). Dividends/tax/fees
+// are deliberately excluded — this is purely buy-vs-sell trading P/L.
+function computeRealizedPL(activities) {
+  const groups = new Map();
+  for (const a of activities) {
+    if ((a.type || "").toLowerCase() !== "trade" || !a.ticker || a.quantity == null) continue;
+    const key = `${a.ticker}__${a.account || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+
+  let total = 0;
+  let incomplete = false;
+  const byTicker = [];
+  for (const [key, rows] of groups) {
+    const sorted = [...rows].sort((x, y) => new Date(x.at) - new Date(y.at));
+    let shares = 0, cost = 0, realized = 0;
+    for (const a of sorted) {
+      if (a.quantity > 0) {
+        shares += a.quantity;
+        cost += -a.amount; // amount is negative (cash out) for a buy
+      } else if (a.quantity < 0) {
+        const sold = -a.quantity;
+        if (sold > shares + 0.0001) incomplete = true; // selling more than this import ever recorded buying
+        const avgCost = shares > 0 ? cost / shares : 0;
+        const costOfSold = avgCost * Math.min(sold, shares);
+        realized += a.amount - costOfSold;
+        cost -= costOfSold;
+        shares = Math.max(0, shares - sold);
+      }
+    }
+    total += realized;
+    const [ticker, account] = key.split("__");
+    if (Math.abs(realized) > 0.005) byTicker.push({ ticker, account: account || null, realized });
+  }
+  byTicker.sort((a, b) => b.realized - a.realized);
+  return { total, byTicker, incomplete };
+}
+
 async function api(path, opts) {
   const r = await fetch(API + path, opts);
   const j = await r.json();
@@ -1445,6 +1487,7 @@ function Activity({state, dispatch}) {
   const [importMsg,setImportMsg] = useState(null);
   const [filter,setFilter] = useState("all");
   const [open,setOpen] = useState({});
+  const [showByTicker,setShowByTicker] = useState(false);
 
   const accounts = [...new Set(activity.map(a=>a.account).filter(Boolean))];
 
@@ -1470,6 +1513,7 @@ function Activity({state, dispatch}) {
   const deposited = sum(a=>a.type === "MoneyMovement");
   const dividends = sum(a=>a.type === "Dividend");
   const taxFees = sum(a=>a.type === "Tax" || a.type === "Fee");
+  const pl = computeRealizedPL(filtered);
 
   return <>
     <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
@@ -1490,6 +1534,35 @@ function Activity({state, dispatch}) {
         {[["all","All"],...accounts.map(a=>[a,a])].map(([k,l])=>
           <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
       </div>}
+
+      <div className="card alt">
+        <div className="lbl">Realized Trading P/L</div>
+        <div className="big" style={{color:pl.total>=0?"var(--green)":"var(--red)",marginTop:6}}>
+          {pl.total>=0?"+":""}{fmt(Math.round(pl.total*100)/100)}
+        </div>
+        <p className="mut" style={{fontSize:12,marginTop:8}}>
+          Matches buys against sells per ticker (and account), using running average cost —
+          dividends, tax, and fees aren't included.
+        </p>
+        {pl.incomplete && <p className="mut" style={{fontSize:12,color:"var(--amber)",marginTop:4}}>
+          Some sales are for more shares than this import ever recorded buying — likely bought
+          before your export's date range. This may overstate the total.
+        </p>}
+        {pl.byTicker.length>0 && <>
+          <button className="link" style={{marginTop:10}} onClick={()=>setShowByTicker(!showByTicker)}>
+            {showByTicker?"Hide":"Show"} breakdown by ticker
+          </button>
+          {showByTicker && <div style={{marginTop:8}}>
+            {pl.byTicker.map((t,i)=>
+              <div key={`${t.ticker}-${t.account}-${i}`} className="row">
+                <span>{t.ticker}{t.account?` · ${t.account}`:""}</span>
+                <span style={{color:t.realized>=0?"var(--green)":"var(--red)"}}>
+                  {t.realized>=0?"+":""}{fmt(Math.round(t.realized*100)/100)}
+                </span>
+              </div>)}
+          </div>}
+        </>}
+      </div>
 
       <div className="card alt">
         <div className="stats3">
