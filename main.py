@@ -1112,6 +1112,49 @@ def analyze_sentiment(headlines: List[dict]) -> SentimentAnalysis:
 # Technicals only here — running FinBERT across 37 tickers' worth of headlines
 # would be far too slow and memory-hungry for a per-request call.
 # ---------------------------------------------------------------------------
+def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """Shared technical-scoring logic for one ticker's OHLCV history, used by
+    both the batched pass and the single-ticker retry below. Returns None
+    (rather than an error dict) when there's not enough usable data — the
+    caller decides what that means in context."""
+    df = df.dropna(how="all")
+    if df.empty or len(df) < 30:
+        return None
+
+    close = df["Close"].dropna()
+    if close.empty:
+        return None
+
+    rsi_series = compute_rsi(close, length=14).dropna()
+    _, _, histogram = compute_macd(close)
+    hist_clean = histogram.dropna()
+
+    rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else None
+    macd_hist_val = float(hist_clean.iloc[-1]) if not hist_clean.empty else None
+    volume_ratio = compute_volume_ratio(df)
+
+    signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
+
+    price = round(float(close.iloc[-1]), 2)
+    change_pct = None
+    if len(close) >= 2:
+        prev = float(close.iloc[-2])
+        if prev:
+            change_pct = round((price - prev) / prev * 100, 2)
+
+    return {
+        "ticker": t,
+        "price": price,
+        "change_pct": change_pct,
+        "rsi": round(rsi_val, 2) if rsi_val is not None else None,
+        "macd_histogram": round(macd_hist_val, 4) if macd_hist_val is not None else None,
+        "volume_ratio": volume_ratio,
+        "signal": signal,
+        "conviction": conviction,
+        "reasoning": reasoning,
+    }
+
+
 def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     tickers = [t.strip().upper() for t in tickers if t and t.strip()]
     if not tickers:
@@ -1144,49 +1187,38 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
             if t not in raw.columns.get_level_values(0):
                 results[t] = {"error": "No data found for this ticker."}
                 continue
-            df = raw[t]
-
-            df = df.dropna(how="all")
-            if df.empty or len(df) < 30:
-                results[t] = {"error": "Not enough price history."}
-                continue
-
-            close = df["Close"].dropna()
-            if close.empty:
-                results[t] = {"error": "No closing prices available."}
-                continue
-
-            rsi_series = compute_rsi(close, length=14).dropna()
-            _, _, histogram = compute_macd(close)
-            hist_clean = histogram.dropna()
-
-            rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else None
-            macd_hist_val = float(hist_clean.iloc[-1]) if not hist_clean.empty else None
-            volume_ratio = compute_volume_ratio(df)
-
-            signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
-
-            price = round(float(close.iloc[-1]), 2)
-            change_pct = None
-            if len(close) >= 2:
-                prev = float(close.iloc[-2])
-                if prev:
-                    change_pct = round((price - prev) / prev * 100, 2)
-
-            results[t] = {
-                "ticker": t,
-                "price": price,
-                "change_pct": change_pct,
-                "rsi": round(rsi_val, 2) if rsi_val is not None else None,
-                "macd_histogram": round(macd_hist_val, 4) if macd_hist_val is not None else None,
-                "volume_ratio": volume_ratio,
-                "signal": signal,
-                "conviction": conviction,
-                "reasoning": reasoning,
-            }
+            scored = _score_history(t, raw[t])
+            results[t] = scored if scored is not None else {"error": "Not enough price history."}
         except Exception as e:
             logger.warning(f"Scoring failed for {t}: {e}")
             results[t] = {"error": "Could not analyze this ticker."}
+
+    # The batched multi-ticker download sometimes comes back sparse for
+    # thinly-traded listings — CAD-hedged CDRs on NEO (.NE) in particular —
+    # even when Yahoo has plenty of history for them individually via a
+    # single-ticker request. Retry the failures with a longer lookback
+    # before giving up, concurrently rather than one at a time (this runs on
+    # every uncached call — /api/digest's watchlist/scan-list scoring and
+    # portfolio analysis both hit batch_score() live, not just the cached
+    # screener), and capped so a large batch of persistent failures can't
+    # turn into dozens of extra round trips on a single request.
+    failed = [t for t in tickers if results.get(t, {}).get("error")][:15]
+
+    def retry_one(t: str):
+        hist = yf.Ticker(t).history(period="2y", interval="1d", auto_adjust=True)
+        return _score_history(t, hist)
+
+    if failed:
+        with ThreadPoolExecutor(max_workers=min(len(failed), 8)) as pool:
+            future_to_ticker = {pool.submit(retry_one, t): t for t in failed}
+            for future in future_to_ticker:
+                t = future_to_ticker[future]
+                try:
+                    scored = future.result()
+                    if scored is not None:
+                        results[t] = scored
+                except Exception as e:
+                    logger.info(f"Single-ticker retry failed for {t}: {e}")
 
     return results
 
