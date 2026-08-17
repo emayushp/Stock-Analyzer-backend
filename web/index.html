@@ -148,6 +148,9 @@ const store = {
 };
 
 const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
+const TABS = [["analyze","Analyze"],["portfolio","Portfolio"],["activity","Activity"],["brief","Brief"],
+  ["journal","Journal"],["screener","Screener"],["learn","Learn"],["settings","Settings"]];
+const TAB_LABELS = Object.fromEntries(TABS);
 const SENT = { positive:"var(--green)", negative:"var(--red)", neutral:"var(--muted)" };
 const fmt = n => n == null ? "—" : Number(n).toLocaleString();
 const pct = n => n == null ? "—" : `${n >= 0 ? "+" : ""}${n}%`;
@@ -629,7 +632,7 @@ function EarningsTrack({quarters}) {
 
 /* ===== Analyze ===== */
 function Analyze({state, dispatch}) {
-  const {q,data,busy,err,watchlist,holdings,portfolioValue} = state;
+  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab} = state;
   const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
   const held = data ? holdings.find(h=>h.ticker===data.ticker) : null;
 
@@ -644,6 +647,8 @@ function Analyze({state, dispatch}) {
   const go = sym => { setSugg([]); setFocus(false); dispatch({type:"analyze", ticker:sym||q}); };
 
   return <>
+    {returnTab && <button className="link" style={{marginBottom:14}} onClick={()=>dispatch({type:"back"})}>
+      ← Back to {TAB_LABELS[returnTab] || returnTab}</button>}
     <div className="searchbar">
       <input value={q} placeholder="Company name or ticker — e.g. Apple, AAPL, SHOP.TO"
         onChange={e=>dispatch({type:"q", v:e.target.value})}
@@ -1696,6 +1701,10 @@ function LogModal({data, onSave, onClose}) {
 /* ===== Root ===== */
 function App() {
   const [tab,setTab] = useState("analyze");
+  // Where "← Back" on Analyze should return to, when it was reached by
+  // clicking a ticker somewhere else (Portfolio, Brief, Screener, ...)
+  // rather than by using the nav bar directly.
+  const [returnTab,setReturnTab] = useState(null);
   const [q,setQ] = useState("");
   const [data,setData] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
   const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
@@ -1722,7 +1731,14 @@ function App() {
   const dispatch = useCallback(a => {
     switch(a.type){
       case "q": setQ(a.v); break;
-      case "analyze": analyze(a.ticker); break;
+      case "analyze":
+        // Remember where we came from, so Analyze can offer a way back —
+        // but only when leaving a different tab, not when jumping between
+        // tickers while already on Analyze (that shouldn't overwrite it).
+        if (tab !== "analyze") setReturnTab(tab);
+        analyze(a.ticker);
+        break;
+      case "back": setTab(returnTab || "analyze"); setReturnTab(null); break;
       case "watch": { const n = watchlist.includes(a.ticker)?watchlist.filter(t=>t!==a.ticker):[...watchlist,a.ticker];
         setWatchlist(n); store.set("ma_watchlist",n); break; }
       case "holdings": setHoldings(a.v); store.set("ma_portfolio",a.v); break;
@@ -1732,18 +1748,18 @@ function App() {
       case "pv": setPV(a.v); break;
       case "logOpen": setLogOpen(true); break;
     }
-  },[watchlist,analyze]);
+  },[watchlist,analyze,tab,returnTab]);
 
-  const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,
+  const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
     scanTickers,setScanTickers:setScanTickersPersist};
 
   return <>
     <header><div className="hdr">
       <div className="logo"><Logo/></div>
       <div><h1>Market Analyzer</h1><div className="tag">Measured signals · not predictions</div></div>
-      <nav>{[["analyze","Analyze"],["portfolio","Portfolio"],["activity","Activity"],["brief","Brief"],["journal","Journal"],
-        ["screener","Screener"],["learn","Learn"],["settings","Settings"]].map(([k,l])=>
-        <button key={k} className={tab===k?"on":""} onClick={()=>setTab(k)}>{l}</button>)}</nav>
+      <nav>{TABS.map(([k,l])=>
+        <button key={k} className={tab===k?"on":""}
+          onClick={()=>{if (k!==tab) setReturnTab(null); setTab(k);}}>{l}</button>)}</nav>
     </div></header>
     <div className="wrap">
       {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
