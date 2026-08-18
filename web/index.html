@@ -745,10 +745,27 @@ function EarningsTrack({quarters}) {
 }
 
 /* ===== Analyze ===== */
+function parseVerdict(text) {
+  if (!text) return null;
+  const secs = {for:[], against:[], bottom:""};
+  let cur = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^the case for:?$/i.test(line)) { cur="for"; continue; }
+    if (/^the case against:?$/i.test(line)) { cur="against"; continue; }
+    if (/^bottom line:?/i.test(line)) { cur="bottom"; secs.bottom = line.replace(/^bottom line:?\s*/i,""); continue; }
+    if (cur==="for" || cur==="against") secs[cur].push(line.replace(/^[-•]\s*/,""));
+    else if (cur==="bottom") secs.bottom += (secs.bottom?" ":"") + line;
+  }
+  return (secs.for.length || secs.against.length || secs.bottom) ? secs : null;
+}
+
 function Analyze({state, dispatch}) {
-  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab} = state;
+  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading} = state;
   const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
   const held = data ? holdings.find(h=>h.ticker===data.ticker) : null;
+  const verdict = data ? parseVerdict(data.ai_verdict) : null;
 
   useEffect(()=>{
     if (!focus || q.trim().length < 2) { setSugg([]); return; }
@@ -812,6 +829,35 @@ function Analyze({state, dispatch}) {
         </div>}
         <Chart ticker={data.ticker} currency={data.currency}/>
       </div>
+
+      {verdictLoading && !verdict && <div className="card alt">
+        <div style={{display:"flex",alignItems:"center",gap:9}}>
+          <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
+          <span className="mut">Weighing the evidence…</span>
+        </div>
+      </div>}
+      {verdict && <div className="card alt">
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:12}}>
+          <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
+          <h2 style={{marginBottom:0}}>Verdict</h2>
+        </div>
+        {verdict.for.length>0 && <>
+          <div className="lbl" style={{color:"var(--green)",marginBottom:6}}>The case for</div>
+          <ul style={{margin:"0 0 14px",paddingLeft:18}}>
+            {verdict.for.map((x,i)=><li key={i} style={{fontSize:13,lineHeight:1.6,marginBottom:4}}>{x}</li>)}
+          </ul>
+        </>}
+        {verdict.against.length>0 && <>
+          <div className="lbl" style={{color:"var(--red)",marginBottom:6}}>The case against</div>
+          <ul style={{margin:"0 0 14px",paddingLeft:18}}>
+            {verdict.against.map((x,i)=><li key={i} style={{fontSize:13,lineHeight:1.6,marginBottom:4}}>{x}</li>)}
+          </ul>
+        </>}
+        {verdict.bottom && <>
+          <div className="lbl" style={{marginBottom:6}}>Bottom line</div>
+          <p style={{fontSize:13.5,lineHeight:1.6,fontWeight:600}}>{verdict.bottom}</p>
+        </>}
+      </div>}
 
       <Readout t={data.technical_analysis}/>
 
@@ -1284,13 +1330,6 @@ function Brief({state, dispatch}) {
     {d && !busy && <>
       <div className="card alt">
         <p style={{fontSize:16,fontWeight:700,lineHeight:1.5}}>{d.headline}</p>
-        {d.ai_summary && <>
-          <div style={{display:"flex",alignItems:"center",gap:7,marginTop:14}}>
-            <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
-            <span style={{fontSize:10.5,color:"var(--faint)",fontWeight:600}}>Today, in plain language</span>
-          </div>
-          <p style={{fontSize:13.5,lineHeight:1.6,marginTop:8,whiteSpace:"pre-wrap"}}>{d.ai_summary}</p>
-        </>}
         <p style={{fontSize:10.5,color:"var(--faint)",marginTop:7}}>{new Date(d.generated_at).toLocaleString()}</p>
       </div>
       {d.portfolio?.holdings?.length>0 && list(d.portfolio.holdings.map(h=>({
@@ -1859,6 +1898,8 @@ function App() {
   const [returnTab,setReturnTab] = useState(null);
   const [q,setQ] = useState("");
   const [data,setData] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [verdictLoading,setVerdictLoading] = useState(false);
+  const verdictTickerRef = useRef(null);
   const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
   const [scanTickers,setScanTickers] = useState(()=>store.get("ma_scan_tickers",[]));
   const [holdings,setHoldings] = useState(()=>store.get("ma_portfolio",[]));
@@ -1875,8 +1916,20 @@ function App() {
   const analyze = useCallback(async sym => {
     const s = (sym||"").trim().toUpperCase();
     if (!s) return;
-    setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null);
-    try { setData(await api(`/api/analyze/${encodeURIComponent(s)}`)); }
+    setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null); setVerdictLoading(false);
+    try {
+      const d = await api(`/api/analyze/${encodeURIComponent(s)}`);
+      setData(d);
+      // The AI Verdict is fetched as a second, separate request rather than
+      // waiting on it here — Claude can take several seconds, and the
+      // technicals/fundamentals/etc. above are already ready to show.
+      setVerdictLoading(true);
+      verdictTickerRef.current = s;
+      api(`/api/analyze/${encodeURIComponent(s)}/verdict`)
+        .then(v => setData(prev => (prev && prev.ticker===s) ? {...prev, ai_verdict:v.ai_verdict} : prev))
+        .catch(()=>{})
+        .finally(()=>{ if (verdictTickerRef.current===s) setVerdictLoading(false); });
+    }
     catch(e){ setErr(e.message); } finally { setBusy(false); }
   },[]);
 
@@ -1903,7 +1956,7 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist};
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading};
 
   return <>
     <header><div className="hdr">

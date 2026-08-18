@@ -6,7 +6,6 @@ company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -330,6 +329,10 @@ class AnalysisResponse(BaseModel):
     cached: bool = False
 
 
+class VerdictResponse(BaseModel):
+    ai_verdict: Optional[str] = None
+
+
 # --- Screener / portfolio / digest -----------------------------------------
 class ScreenerHit(BaseModel):
     ticker: str
@@ -421,7 +424,6 @@ class DigestResponse(BaseModel):
     under20_avoid: List[ScreenerHit]
     headline: str
     note: str
-    ai_summary: Optional[str] = None
     generated_at: str
 
 
@@ -1669,6 +1671,116 @@ def search(q: str = ""):
     return SearchResponse(query=q, results=search_symbols(q))
 
 
+AI_VERDICT_MODEL = "claude-sonnet-5"
+_VERDICT_CACHE: Dict[str, Tuple[float, str]] = {}
+
+
+def generate_ai_verdict(
+    ticker: str,
+    company_name: str,
+    current_price: Optional[float],
+    price_change_pct: Optional[float],
+    currency: str,
+    technical: TechnicalAnalysis,
+    fundamentals: Fundamentals,
+    quality: QualityScore,
+    data_quality: DataQuality,
+    regime: MarketRegime,
+    earnings: EarningsInfo,
+    price_targets: PriceTargets,
+    sentiment: SentimentAnalysis,
+) -> Optional[str]:
+    """
+    The one place in the app that actually reasons across everything it
+    already knows about a stock — technicals, fundamentals, quality, market
+    regime, earnings timing, news sentiment, and (the part no dashboard card
+    can show on its own) whether this exact signal has actually had an edge
+    on THIS ticker historically. Called from the separate /verdict endpoint
+    below (see _VERDICT_CACHE), not inline in /api/analyze, so a slow Claude
+    call never blocks data that's already computed.
+    """
+    client = _get_anthropic_client()
+    if client is None:
+        return None
+
+    payload = {
+        "ticker": ticker,
+        "company_name": company_name,
+        "price": current_price,
+        "price_change_pct": price_change_pct,
+        "currency": currency,
+        "technical_signal": {
+            "signal": technical.signal,
+            "conviction": technical.conviction,
+            "rsi": technical.rsi,
+            "macd_histogram": technical.macd_histogram,
+            "volume_ratio": technical.volume_ratio,
+            "reasoning": technical.reasoning,
+            "divergence": technical.divergence,
+        },
+        "signal_track_record": {
+            "historical_edge_vs_baseline": technical.track_record_edge,
+            "sample_size": technical.track_record_events,
+            "note": technical.track_record_note,
+        },
+        "data_reliability": {
+            "reliability": data_quality.reliability,
+            "is_derivative_or_thinly_traded": data_quality.is_derivative,
+            "warnings": data_quality.warnings,
+        },
+        "fundamentals": fundamentals.model_dump(),
+        "quality_score": quality.model_dump(),
+        "market_regime": regime.model_dump(),
+        "earnings": earnings.model_dump(),
+        "price_targets": price_targets.model_dump(),
+        "news_sentiment": {
+            "bullish_score": sentiment.bullish_score,
+            "overall_impact": sentiment.overall_impact,
+            "headline_count": sentiment.headline_count,
+            "headlines": [
+                {"title": h.title, "sentiment": h.sentiment, "context": h.context}
+                for h in sentiment.headlines
+            ],
+        },
+    }
+
+    try:
+        response = client.with_options(timeout=25.0).messages.create(
+            model=AI_VERDICT_MODEL,
+            max_tokens=800,
+            output_config={"effort": "medium"},
+            system=(
+                "You write an 'AI Verdict' for someone deciding whether to buy, hold, or "
+                "sell a stock. You're given everything this app already computed for the "
+                "ticker: a technical signal, that exact signal's own historical backtest "
+                "track record on THIS ticker, fundamentals, a quality score, the broader "
+                "market regime, earnings timing, and recent news sentiment — no information "
+                "beyond what's in the JSON, and never invent facts, news, or numbers not "
+                "present there.\n\n"
+                "Your job is synthesis, not repetition: don't just restate each field. "
+                "Explicitly call out where the evidence agrees and where it conflicts — "
+                "e.g. a BUY signal with a weak or small-sample track record is meaningfully "
+                "different from one with a strong, well-sampled edge; a technical signal "
+                "fighting the broader market regime or contradicted by news sentiment is "
+                "worth flagging. If data reliability is Poor or the instrument is thinly "
+                "traded/derivative, say so plainly and weight everything else accordingly.\n\n"
+                "Structure the response as three short parts with these exact headers on "
+                "their own line: 'The case for:', 'The case against:', 'Bottom line:'. Each "
+                "of the first two is 1-3 short bullet points (prefix each with '- '); the "
+                "bottom line is 1-2 plain sentences weighing them against each other. Never "
+                "issue an instruction ('buy this', 'sell now') — frame it the way a careful "
+                "analyst would, laying out the evidence for the person to weigh themselves. "
+                "Keep the whole thing tight; skip padding."
+            ),
+            messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+        )
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        return text or None
+    except Exception as e:
+        logger.warning(f"AI verdict generation failed for {ticker}: {e}")
+        return None
+
+
 @app.get("/api/analyze/{ticker}", response_model=AnalysisResponse)
 def analyze(ticker: str):
     ticker = ticker.strip().upper()
@@ -1810,6 +1922,45 @@ def analyze(ticker: str):
     return response
 
 
+@app.get("/api/analyze/{ticker}/verdict", response_model=VerdictResponse)
+def analyze_verdict(ticker: str):
+    """
+    The AI Verdict, split out from /api/analyze itself. It reuses that
+    endpoint's cached technicals/fundamentals/etc. rather than refetching,
+    but runs as its own request so a slow Claude call never adds latency to
+    (or, worse, drops) the price/technical/fundamental data that's already
+    computed and ready. Call this only after /api/analyze/{ticker} has
+    populated the cache for the same ticker.
+    """
+    ticker = ticker.strip().upper()
+    cached = cache_get(ticker)
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="No cached analysis for this ticker yet — call /api/analyze/{ticker} first.",
+        )
+
+    # Reuse across repeat views of the same ticker within the analysis cache
+    # window — otherwise reopening the Analyze screen re-triggers a Claude
+    # call every time even though nothing underneath changed.
+    cached_verdict = _VERDICT_CACHE.get(ticker)
+    if cached_verdict and time.time() - cached_verdict[0] < _CACHE_TTL_SECONDS:
+        return VerdictResponse(ai_verdict=cached_verdict[1])
+
+    a = AnalysisResponse(**cached)
+    verdict = generate_ai_verdict(
+        a.ticker, a.company_name, a.current_price, a.price_change_pct, a.currency,
+        a.technical_analysis, a.fundamentals, a.quality, a.data_quality, a.regime,
+        a.earnings, a.price_targets, a.sentiment_analysis,
+    )
+    if verdict:
+        _VERDICT_CACHE[ticker] = (time.time(), verdict)
+        if len(_VERDICT_CACHE) > 100:
+            oldest = min(_VERDICT_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _VERDICT_CACHE.pop(oldest, None)
+    return VerdictResponse(ai_verdict=verdict)
+
+
 @app.get("/api/screener", response_model=ScreenerResponse)
 def screener(force: bool = False):
     """Scan the fixed universe for current BUY / SELL technical signals."""
@@ -1871,24 +2022,12 @@ def portfolio_analyze(request: PortfolioRequest):
 
 
 # ---------------------------------------------------------------------------
-# AI-generated daily brief (Claude). Everything upstream in /api/digest is
-# mechanical (RSI/MACD/volume) — this is the one place that actually reasons
-# across the whole picture (portfolio + watchlist + screener) the way a
-# person asking "what should I look at today" would want explained, rather
-# than a templated headline string.
-#
-# Cached by a hash of the underlying signal data, not by time: since the
-# screener itself only refreshes hourly, the digest inputs are naturally
-# stable for a while, so repeat page loads (opening the app 100x/day) hit
-# the cache instead of calling the API again. The TTL below is just a
-# safety-net ceiling in case the hash were ever to stay put across a stale
-# cache entry lingering too long.
+# Claude client — shared by any AI-generated feature. Lazily constructed so
+# the app runs fine with it entirely unset; every caller must treat None as
+# "feature disabled" and degrade gracefully, never raise.
 # ---------------------------------------------------------------------------
 _anthropic_client: Optional[anthropic.Anthropic] = None
 _anthropic_unavailable_logged = False
-AI_BRIEF_MODEL = "claude-sonnet-5"
-_AI_BRIEF_CACHE: Dict[str, Tuple[float, str]] = {}
-_AI_BRIEF_TTL_SECONDS = 6 * 3600
 
 
 def _get_anthropic_client() -> Optional[anthropic.Anthropic]:
@@ -1897,81 +2036,11 @@ def _get_anthropic_client() -> Optional[anthropic.Anthropic]:
         return _anthropic_client
     if not os.environ.get("ANTHROPIC_API_KEY"):
         if not _anthropic_unavailable_logged:
-            logger.info("ANTHROPIC_API_KEY not set — AI brief disabled, rest of the app is unaffected.")
+            logger.info("ANTHROPIC_API_KEY not set — AI features disabled, rest of the app is unaffected.")
             _anthropic_unavailable_logged = True
         return None
     _anthropic_client = anthropic.Anthropic()
     return _anthropic_client
-
-
-def generate_ai_brief(
-    portfolio: Optional[PortfolioResponse],
-    watchlist_signals: List[ScreenerHit],
-    opportunities: List[ScreenerHit],
-    warnings: List[ScreenerHit],
-    under20_buys: List[ScreenerHit],
-    under20_avoid: List[ScreenerHit],
-) -> Optional[str]:
-    client = _get_anthropic_client()
-    if client is None:
-        return None
-
-    payload = {
-        "portfolio_holdings": [
-            {
-                "ticker": h.ticker,
-                "account": h.account,
-                "pl_pct": h.unrealized_pl_pct,
-                "day_pl_pct": h.day_pl_pct,
-                "signal": h.signal,
-                "conviction": h.conviction,
-                "rsi": h.rsi,
-                "reasoning": h.reasoning,
-            }
-            for h in (portfolio.holdings if portfolio else [])
-        ],
-        "watchlist_signals": [h.model_dump() for h in watchlist_signals],
-        "screener_opportunities": [h.model_dump() for h in opportunities[:10]],
-        "screener_warnings": [h.model_dump() for h in warnings[:10]],
-        "under20_buys": [h.model_dump() for h in under20_buys[:5]],
-        "under20_avoid": [h.model_dump() for h in under20_avoid[:5]],
-    }
-    if not any(payload.values()):
-        return None
-
-    cache_key = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-    cached = _AI_BRIEF_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] < _AI_BRIEF_TTL_SECONDS:
-        return cached[1]
-
-    try:
-        response = client.with_options(timeout=20.0).messages.create(
-            model=AI_BRIEF_MODEL,
-            max_tokens=500,
-            output_config={"effort": "low"},  # short synthesis task — keep it cheap
-            system=(
-                "You write a short daily brief for someone checking their stock portfolio. "
-                "You're given ONLY mechanical technical signals (RSI/MACD/volume-derived) for "
-                "their holdings, watchlist, and a screener scan — no news, no data beyond what's "
-                "in the JSON. Synthesize it into what actually matters today: 2-4 short "
-                "sentences or bullets, plain language, specific tickers and numbers from the "
-                "data. Never tell them to buy or sell — frame things the same way a careful "
-                "analyst would ('worth reviewing', 'still holding up'), not as instructions. "
-                "If nothing stands out, say so briefly instead of padding. Do not invent facts, "
-                "news, or context not present in the data."
-            ),
-            messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
-        )
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
-        if not text:
-            return None
-    except Exception as e:
-        logger.warning(f"AI brief generation failed: {e}")
-        return None
-
-    _AI_BRIEF_CACHE.clear()  # single-slot: only the latest signal snapshot is worth keeping
-    _AI_BRIEF_CACHE[cache_key] = (time.time(), text)
-    return text
 
 
 @app.post("/api/digest", response_model=DigestResponse)
@@ -2041,10 +2110,6 @@ def digest(request: DigestRequest, force: bool = False):
         bits.append(f"{len(opportunities)} buy signal(s) in the scanned universe")
     headline = " · ".join(bits) if bits else "No significant signals this morning."
 
-    ai_summary = generate_ai_brief(
-        portfolio, watchlist_signals, opportunities, warnings, under20_buys, under20_avoid
-    )
-
     return DigestResponse(
         portfolio=portfolio,
         watchlist_signals=watchlist_signals,
@@ -2053,7 +2118,6 @@ def digest(request: DigestRequest, force: bool = False):
         under20_buys=under20_buys,
         under20_avoid=under20_avoid,
         headline=headline,
-        ai_summary=ai_summary,
         note=(
             "This brief uses RSI, MACD and volume only — no news sentiment, which is "
             "too slow to run across this many tickers. Signals are mechanical, drawn "
