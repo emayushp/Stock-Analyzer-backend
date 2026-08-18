@@ -88,13 +88,13 @@ SCREENER_UNIVERSE = [
     "ADBE", "CSCO", "IBM", "QCOM", "TXN", "AVGO", "NOW", "INTU", "AMAT",
     "MU", "INTC", "AMD", "PYPL", "UBER", "ABNB",
     "ADI", "LRCX", "KLAC", "SNPS", "CDNS", "PANW", "CRWD", "FTNT", "WDAY",
-    "TEAM", "SNOW", "NET", "DDOG", "ZS", "MDB", "SQ", "ADSK",
+    "TEAM", "SNOW", "NET", "DDOG", "ZS", "MDB", "ADSK",
     "NXPI", "MRVL", "ON", "SWKS", "MCHP", "KEYS", "TER", "GRMN", "HPQ",
     "DELL", "NTAP", "STX", "WDC", "AKAM", "VRSN", "GDDY", "EBAY", "ETSY", "DOCU", "OKTA",
     # US Financials
     "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "AXP", "BLK", "C",
     "SCHW", "USB", "PNC", "TFC", "COF", "AIG", "MET", "PRU", "TRV", "ALL",
-    "BX", "KKR", "APO", "ICE", "CME", "NDAQ", "SPGI", "MCO", "AON", "MMC",
+    "BX", "KKR", "APO", "ICE", "CME", "NDAQ", "SPGI", "MCO", "AON",
     "AJG", "WTW", "BEN", "IVZ", "STT",
     # US Healthcare
     "UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "TMO", "ABT", "BMY", "CVS",
@@ -105,13 +105,13 @@ SCREENER_UNIVERSE = [
     # US Consumer
     "WMT", "HD", "COST", "PG", "KO", "PEP", "MCD", "NKE", "SBUX", "TGT",
     "LOW", "TJX", "BKNG", "CMG", "YUM", "DG", "DLTR", "EL", "CL", "KMB",
-    "GIS", "K",
+    "GIS",
     "SYY", "ADM", "HSY", "MKC", "CLX", "CHD", "KDP", "MNST", "STZ", "TAP",
     "PM", "MO", "ROST", "ULTA", "LULU", "DPZ", "DRI",
     "AZO", "ORLY", "BBY", "GPC", "TSCO", "YETI", "DECK", "POOL",
     # US Energy
     "XOM", "CVX", "COP", "SLB", "PSX", "MPC", "VLO", "OXY", "WMB", "KMI",
-    "HES", "DVN", "FANG", "EOG", "HAL", "BKR", "TRGP", "OKE",
+    "DVN", "FANG", "EOG", "HAL", "BKR", "TRGP", "OKE",
     # US Industrials
     "BA", "CAT", "GE", "HON", "UPS", "LMT", "RTX",
     "DE", "MMM", "EMR", "ETN", "ITW", "PH", "GD", "NOC", "UNP", "CSX", "NSC", "FDX",
@@ -155,7 +155,7 @@ SCREENER_UNIVERSE = [
 # by the Brief's "Canadian Stocks Under $20" section. Same rationale as above:
 # a fixed, known list rather than scanning the whole exchange.
 CANADIAN_UNDER_20_UNIVERSE = [
-    "AC.TO", "BB.TO", "CGX.TO", "BTE.TO", "MEG.TO", "NPI.TO", "TOU.TO",
+    "AC.TO", "BB.TO", "CGX.TO", "BTE.TO", "NPI.TO", "TOU.TO",
     "WPM.TO", "KEY.TO", "PEY.TO", "CVE.TO", "BTO.TO", "IMG.TO", "ELD.TO",
     "AGI.TO", "FM.TO", "TA.TO", "H.TO", "GIB-A.TO", "DOO.TO",
 ]
