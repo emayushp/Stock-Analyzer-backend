@@ -6,6 +6,8 @@ company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -14,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import anthropic
 import numpy as np
 import pandas as pd
 import torch
@@ -418,6 +421,7 @@ class DigestResponse(BaseModel):
     under20_avoid: List[ScreenerHit]
     headline: str
     note: str
+    ai_summary: Optional[str] = None
     generated_at: str
 
 
@@ -1866,6 +1870,110 @@ def portfolio_analyze(request: PortfolioRequest):
     return analyze_portfolio(request.holdings)
 
 
+# ---------------------------------------------------------------------------
+# AI-generated daily brief (Claude). Everything upstream in /api/digest is
+# mechanical (RSI/MACD/volume) — this is the one place that actually reasons
+# across the whole picture (portfolio + watchlist + screener) the way a
+# person asking "what should I look at today" would want explained, rather
+# than a templated headline string.
+#
+# Cached by a hash of the underlying signal data, not by time: since the
+# screener itself only refreshes hourly, the digest inputs are naturally
+# stable for a while, so repeat page loads (opening the app 100x/day) hit
+# the cache instead of calling the API again. The TTL below is just a
+# safety-net ceiling in case the hash were ever to stay put across a stale
+# cache entry lingering too long.
+# ---------------------------------------------------------------------------
+_anthropic_client: Optional[anthropic.Anthropic] = None
+_anthropic_unavailable_logged = False
+AI_BRIEF_MODEL = "claude-sonnet-5"
+_AI_BRIEF_CACHE: Dict[str, Tuple[float, str]] = {}
+_AI_BRIEF_TTL_SECONDS = 6 * 3600
+
+
+def _get_anthropic_client() -> Optional[anthropic.Anthropic]:
+    global _anthropic_client, _anthropic_unavailable_logged
+    if _anthropic_client is not None:
+        return _anthropic_client
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        if not _anthropic_unavailable_logged:
+            logger.info("ANTHROPIC_API_KEY not set — AI brief disabled, rest of the app is unaffected.")
+            _anthropic_unavailable_logged = True
+        return None
+    _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
+
+
+def generate_ai_brief(
+    portfolio: Optional[PortfolioResponse],
+    watchlist_signals: List[ScreenerHit],
+    opportunities: List[ScreenerHit],
+    warnings: List[ScreenerHit],
+    under20_buys: List[ScreenerHit],
+    under20_avoid: List[ScreenerHit],
+) -> Optional[str]:
+    client = _get_anthropic_client()
+    if client is None:
+        return None
+
+    payload = {
+        "portfolio_holdings": [
+            {
+                "ticker": h.ticker,
+                "account": h.account,
+                "pl_pct": h.unrealized_pl_pct,
+                "day_pl_pct": h.day_pl_pct,
+                "signal": h.signal,
+                "conviction": h.conviction,
+                "rsi": h.rsi,
+                "reasoning": h.reasoning,
+            }
+            for h in (portfolio.holdings if portfolio else [])
+        ],
+        "watchlist_signals": [h.model_dump() for h in watchlist_signals],
+        "screener_opportunities": [h.model_dump() for h in opportunities[:10]],
+        "screener_warnings": [h.model_dump() for h in warnings[:10]],
+        "under20_buys": [h.model_dump() for h in under20_buys[:5]],
+        "under20_avoid": [h.model_dump() for h in under20_avoid[:5]],
+    }
+    if not any(payload.values()):
+        return None
+
+    cache_key = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+    cached = _AI_BRIEF_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < _AI_BRIEF_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        response = client.with_options(timeout=20.0).messages.create(
+            model=AI_BRIEF_MODEL,
+            max_tokens=500,
+            output_config={"effort": "low"},  # short synthesis task — keep it cheap
+            system=(
+                "You write a short daily brief for someone checking their stock portfolio. "
+                "You're given ONLY mechanical technical signals (RSI/MACD/volume-derived) for "
+                "their holdings, watchlist, and a screener scan — no news, no data beyond what's "
+                "in the JSON. Synthesize it into what actually matters today: 2-4 short "
+                "sentences or bullets, plain language, specific tickers and numbers from the "
+                "data. Never tell them to buy or sell — frame things the same way a careful "
+                "analyst would ('worth reviewing', 'still holding up'), not as instructions. "
+                "If nothing stands out, say so briefly instead of padding. Do not invent facts, "
+                "news, or context not present in the data."
+            ),
+            messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+        )
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        if not text:
+            return None
+    except Exception as e:
+        logger.warning(f"AI brief generation failed: {e}")
+        return None
+
+    _AI_BRIEF_CACHE.clear()  # single-slot: only the latest signal snapshot is worth keeping
+    _AI_BRIEF_CACHE[cache_key] = (time.time(), text)
+    return text
+
+
 @app.post("/api/digest", response_model=DigestResponse)
 def digest(request: DigestRequest, force: bool = False):
     """
@@ -1933,6 +2041,10 @@ def digest(request: DigestRequest, force: bool = False):
         bits.append(f"{len(opportunities)} buy signal(s) in the scanned universe")
     headline = " · ".join(bits) if bits else "No significant signals this morning."
 
+    ai_summary = generate_ai_brief(
+        portfolio, watchlist_signals, opportunities, warnings, under20_buys, under20_avoid
+    )
+
     return DigestResponse(
         portfolio=portfolio,
         watchlist_signals=watchlist_signals,
@@ -1941,6 +2053,7 @@ def digest(request: DigestRequest, force: bool = False):
         under20_buys=under20_buys,
         under20_avoid=under20_avoid,
         headline=headline,
+        ai_summary=ai_summary,
         note=(
             "This brief uses RSI, MACD and volume only — no news sentiment, which is "
             "too slow to run across this many tickers. Signals are mechanical, drawn "

@@ -1284,6 +1284,13 @@ function Brief({state, dispatch}) {
     {d && !busy && <>
       <div className="card alt">
         <p style={{fontSize:16,fontWeight:700,lineHeight:1.5}}>{d.headline}</p>
+        {d.ai_summary && <>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginTop:14}}>
+            <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
+            <span style={{fontSize:10.5,color:"var(--faint)",fontWeight:600}}>Today, in plain language</span>
+          </div>
+          <p style={{fontSize:13.5,lineHeight:1.6,marginTop:8,whiteSpace:"pre-wrap"}}>{d.ai_summary}</p>
+        </>}
         <p style={{fontSize:10.5,color:"var(--faint)",marginTop:7}}>{new Date(d.generated_at).toLocaleString()}</p>
       </div>
       {d.portfolio?.holdings?.length>0 && list(d.portfolio.holdings.map(h=>({
