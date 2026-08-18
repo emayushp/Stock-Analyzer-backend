@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -21,7 +22,7 @@ import pandas as pd
 import torch
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
@@ -32,7 +33,31 @@ torch.set_num_threads(1)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stock-analyzer")
 
-app = FastAPI(title="Stock Market Analysis API", version="2.0.0")
+
+def _sanitize_non_finite(obj):
+    """Replace NaN/Infinity with None, recursively. A handful of yfinance-
+    derived calculations (RSI on a flat/degenerate price series, ratios with
+    a near-zero denominator, etc.) can legitimately produce NaN or inf, and
+    Starlette's default JSONResponse uses allow_nan=False — a single such
+    value anywhere in a response raises ValueError and turns into a raw 500
+    for the whole request, not just a missing field. Since we already treat
+    "couldn't compute this" as None everywhere else in the app, do the same
+    here instead of leaving this as a crash."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_non_finite(v) for v in obj]
+    return obj
+
+
+class SanitizingJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return super().render(_sanitize_non_finite(content))
+
+
+app = FastAPI(title="Stock Market Analysis API", version="2.0.0", default_response_class=SanitizingJSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
