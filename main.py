@@ -23,7 +23,7 @@ import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
 # Fewer threads = less memory overhead from torch's internal thread pool.
@@ -329,8 +329,14 @@ class AnalysisResponse(BaseModel):
     cached: bool = False
 
 
-class VerdictResponse(BaseModel):
-    ai_verdict: Optional[str] = None
+class AIDecisionResponse(BaseModel):
+    conviction_score: Optional[int] = None
+    conviction_label: Optional[str] = None
+    entry: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_reward_ratio: Optional[float] = None
+    rationale: Optional[str] = None
 
 
 # --- Screener / portfolio / digest -----------------------------------------
@@ -1671,11 +1677,56 @@ def search(q: str = ""):
     return SearchResponse(query=q, results=search_symbols(q))
 
 
-AI_VERDICT_MODEL = "claude-sonnet-5"
-_VERDICT_CACHE: Dict[str, Tuple[float, str]] = {}
+AI_DECISION_MODEL = "claude-sonnet-5"
+_DECISION_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
-def generate_ai_verdict(
+class AIDecisionOutput(BaseModel):
+    """
+    Strict schema for the structured-output request itself (all fields
+    required, so the response always parses cleanly) — not the API response
+    model. See AIDecisionResponse below for what /api/analyze/{ticker}/decision
+    actually returns, which is nullable throughout for the disabled/failed case.
+    """
+    conviction_score: int = Field(ge=0, le=100, description=(
+        "0-100. Weigh the technical signal, its own historical track record on "
+        "THIS ticker, fundamentals, quality score, market regime, earnings timing, "
+        "and news sentiment together into one number. Don't default to 50 out of "
+        "caution — commit to a real number reflecting the actual weight of evidence. "
+        "A signal with a weak/small-sample track record, or one fighting the market "
+        "regime, or contradicted by sentiment, should score meaningfully lower than "
+        "one where everything agrees and the track record is real."
+    ))
+    conviction_label: str = Field(description="2-4 words, e.g. 'Strong setup', 'Mixed signals', 'Weak case', 'High risk'.")
+    entry: Optional[float] = Field(description=(
+        "Suggested entry price, adjusted from mechanical_price_targets.entry only if "
+        "something in the context gives a specific reason to. mechanical_price_targets.entry "
+        "is null whenever the signal is HOLD/SELL with no suggested entry — in that case "
+        "you MUST return null here too. Never invent a price level with no baseline to "
+        "anchor to."
+    ))
+    stop_loss: Optional[float] = Field(description=(
+        "Suggested stop-loss price, same rule as entry: adjust mechanical_price_targets."
+        "stop_loss (e.g. widen ahead of earnings, tighten if data reliability is poor) "
+        "or return it unchanged — but null if the baseline is null."
+    ))
+    take_profit: Optional[float] = Field(description=(
+        "Suggested take-profit price, same rule as entry: adjust mechanical_price_targets."
+        "take_profit (e.g. pull it inside a nearby resistance/support level) or return it "
+        "unchanged — but null if the baseline is null."
+    ))
+    risk_reward_ratio: Optional[float] = Field(description=(
+        "Recomputed from YOUR final entry/stop_loss/take_profit above, not copied from the "
+        "baseline. Null if those are null."
+    ))
+    rationale: str = Field(description=(
+        "One sentence, under 20 words: the single biggest factor behind the score, "
+        "and 'kept mechanical baseline' or a note on whatever price adjustment was made "
+        "(or that no price levels apply, if entry is null)."
+    ))
+
+
+def generate_ai_decision(
     ticker: str,
     company_name: str,
     current_price: Optional[float],
@@ -1689,15 +1740,17 @@ def generate_ai_verdict(
     earnings: EarningsInfo,
     price_targets: PriceTargets,
     sentiment: SentimentAnalysis,
-) -> Optional[str]:
+) -> Optional[AIDecisionOutput]:
     """
     The one place in the app that actually reasons across everything it
     already knows about a stock — technicals, fundamentals, quality, market
     regime, earnings timing, news sentiment, and (the part no dashboard card
     can show on its own) whether this exact signal has actually had an edge
-    on THIS ticker historically. Called from the separate /verdict endpoint
-    below (see _VERDICT_CACHE), not inline in /api/analyze, so a slow Claude
-    call never blocks data that's already computed.
+    on THIS ticker historically. Returns a decision artifact (a conviction
+    score plus concrete price levels) instead of prose to read — see
+    AIDecisionOutput. Called from the separate /decision endpoint below (see
+    _DECISION_CACHE), not inline in /api/analyze, so a slow Claude call never
+    blocks data that's already computed.
     """
     client = _get_anthropic_client()
     if client is None:
@@ -1732,7 +1785,7 @@ def generate_ai_verdict(
         "quality_score": quality.model_dump(),
         "market_regime": regime.model_dump(),
         "earnings": earnings.model_dump(),
-        "price_targets": price_targets.model_dump(),
+        "mechanical_price_targets": price_targets.model_dump(),
         "news_sentiment": {
             "bullish_score": sentiment.bullish_score,
             "overall_impact": sentiment.overall_impact,
@@ -1745,39 +1798,45 @@ def generate_ai_verdict(
     }
 
     try:
-        response = client.with_options(timeout=25.0).messages.create(
-            model=AI_VERDICT_MODEL,
+        response = client.with_options(timeout=25.0).messages.parse(
+            model=AI_DECISION_MODEL,
             max_tokens=800,
-            output_config={"effort": "medium"},
             system=(
-                "You write an 'AI Verdict' for someone deciding whether to buy, hold, or "
-                "sell a stock. You're given everything this app already computed for the "
-                "ticker: a technical signal, that exact signal's own historical backtest "
-                "track record on THIS ticker, fundamentals, a quality score, the broader "
-                "market regime, earnings timing, and recent news sentiment — no information "
-                "beyond what's in the JSON, and never invent facts, news, or numbers not "
-                "present there.\n\n"
-                "Your job is synthesis, not repetition: don't just restate each field. "
-                "Explicitly call out where the evidence agrees and where it conflicts — "
-                "e.g. a BUY signal with a weak or small-sample track record is meaningfully "
-                "different from one with a strong, well-sampled edge; a technical signal "
-                "fighting the broader market regime or contradicted by news sentiment is "
-                "worth flagging. If data reliability is Poor or the instrument is thinly "
-                "traded/derivative, say so plainly and weight everything else accordingly.\n\n"
-                "Structure the response as three short parts with these exact headers on "
-                "their own line: 'The case for:', 'The case against:', 'Bottom line:'. Each "
-                "of the first two is 1-3 short bullet points (prefix each with '- '); the "
-                "bottom line is 1-2 plain sentences weighing them against each other. Never "
-                "issue an instruction ('buy this', 'sell now') — frame it the way a careful "
-                "analyst would, laying out the evidence for the person to weigh themselves. "
-                "Keep the whole thing tight; skip padding."
+                "You compute a decision score and price levels for someone deciding "
+                "whether to buy, hold, or sell a stock — a concrete artifact to act on, "
+                "not a paragraph to read and interpret. You're given everything this app "
+                "already computed for the ticker: a technical signal, that exact signal's "
+                "own historical backtest track record on THIS ticker, fundamentals, a "
+                "quality score, the broader market regime, earnings timing, recent news "
+                "sentiment, and the existing mechanical (ATR-based) price targets — no "
+                "information beyond what's in the JSON, and never invent facts, news, or "
+                "numbers not present there.\n\n"
+                "Only adjust entry/stop_loss/take_profit away from the mechanical baseline "
+                "when something in the context gives a specific, statable reason (earnings "
+                "gap risk, poor data reliability, a support/resistance level that makes the "
+                "baseline unrealistic) — otherwise return the baseline values unchanged. If "
+                "mechanical_price_targets.entry is null (a HOLD/SELL signal with no suggested "
+                "entry), you MUST return null for entry, stop_loss, take_profit, and "
+                "risk_reward_ratio too — there is no baseline to adjust from, and inventing "
+                "price levels here would be a fabricated trade setup, not an analysis. "
+                "Never issue an instruction ('buy this now') — the numbers themselves are "
+                "the output; rationale is one sentence explaining them, not advice."
             ),
             messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+            output_format=AIDecisionOutput,
         )
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
-        return text or None
+        decision = response.parsed_output
+        if decision is None:
+            return None
+        # Match compute_price_targets()'s own convention (round(x, 2)) rather
+        # than showing whatever raw float precision the model returned.
+        for f in ("entry", "stop_loss", "take_profit", "risk_reward_ratio"):
+            val = getattr(decision, f)
+            if val is not None:
+                setattr(decision, f, round(val, 2))
+        return decision
     except Exception as e:
-        logger.warning(f"AI verdict generation failed for {ticker}: {e}")
+        logger.warning(f"AI decision generation failed for {ticker}: {e}")
         return None
 
 
@@ -1922,10 +1981,10 @@ def analyze(ticker: str):
     return response
 
 
-@app.get("/api/analyze/{ticker}/verdict", response_model=VerdictResponse)
-def analyze_verdict(ticker: str):
+@app.get("/api/analyze/{ticker}/decision", response_model=AIDecisionResponse)
+def analyze_decision(ticker: str):
     """
-    The AI Verdict, split out from /api/analyze itself. It reuses that
+    The AI Decision, split out from /api/analyze itself. It reuses that
     endpoint's cached technicals/fundamentals/etc. rather than refetching,
     but runs as its own request so a slow Claude call never adds latency to
     (or, worse, drops) the price/technical/fundamental data that's already
@@ -1943,22 +2002,25 @@ def analyze_verdict(ticker: str):
     # Reuse across repeat views of the same ticker within the analysis cache
     # window — otherwise reopening the Analyze screen re-triggers a Claude
     # call every time even though nothing underneath changed.
-    cached_verdict = _VERDICT_CACHE.get(ticker)
-    if cached_verdict and time.time() - cached_verdict[0] < _CACHE_TTL_SECONDS:
-        return VerdictResponse(ai_verdict=cached_verdict[1])
+    cached_decision = _DECISION_CACHE.get(ticker)
+    if cached_decision and time.time() - cached_decision[0] < _CACHE_TTL_SECONDS:
+        return AIDecisionResponse(**cached_decision[1])
 
     a = AnalysisResponse(**cached)
-    verdict = generate_ai_verdict(
+    decision = generate_ai_decision(
         a.ticker, a.company_name, a.current_price, a.price_change_pct, a.currency,
         a.technical_analysis, a.fundamentals, a.quality, a.data_quality, a.regime,
         a.earnings, a.price_targets, a.sentiment_analysis,
     )
-    if verdict:
-        _VERDICT_CACHE[ticker] = (time.time(), verdict)
-        if len(_VERDICT_CACHE) > 100:
-            oldest = min(_VERDICT_CACHE.items(), key=lambda kv: kv[1][0])[0]
-            _VERDICT_CACHE.pop(oldest, None)
-    return VerdictResponse(ai_verdict=verdict)
+    if decision is None:
+        return AIDecisionResponse()
+
+    decision_dict = decision.model_dump()
+    _DECISION_CACHE[ticker] = (time.time(), decision_dict)
+    if len(_DECISION_CACHE) > 100:
+        oldest = min(_DECISION_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _DECISION_CACHE.pop(oldest, None)
+    return AIDecisionResponse(**decision_dict)
 
 
 @app.get("/api/screener", response_model=ScreenerResponse)
