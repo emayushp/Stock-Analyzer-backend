@@ -879,7 +879,7 @@ function EarningsTrack({quarters}) {
 
 /* ===== Analyze ===== */
 function Analyze({state, dispatch}) {
-  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading} = state;
+  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading,requestDecision} = state;
   const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
   const held = data ? holdings.find(h=>h.ticker===data.ticker) : null;
   const decision = data && data.ai_decision && data.ai_decision.conviction_score != null ? data.ai_decision : null;
@@ -947,6 +947,13 @@ function Analyze({state, dispatch}) {
         <Chart ticker={data.ticker} currency={data.currency}/>
       </div>
 
+      {!decision && !verdictLoading && <div className="card alt" style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:180}}>
+          <div className="ai-badge-row" style={{marginBottom:6}}><span className="ai-badge">AI</span></div>
+          <p className="mut">Conviction score, entry/stop/target — one on-demand request, not fetched automatically.</p>
+        </div>
+        <button className="btn" onClick={requestDecision}>Get AI Decision</button>
+      </div>}
       {verdictLoading && !decision && <div className="card alt">
         <div style={{display:"flex",alignItems:"center",gap:9}}>
           <span className="ai-badge">AI</span>
@@ -2154,18 +2161,24 @@ function App() {
     try {
       const d = await api(`/api/analyze/${encodeURIComponent(s)}`);
       setData(d);
-      // The AI Decision is fetched as a second, separate request rather than
-      // waiting on it here — Claude can take several seconds, and the
-      // technicals/fundamentals/etc. above are already ready to show.
-      setVerdictLoading(true);
-      verdictTickerRef.current = s;
-      api(`/api/analyze/${encodeURIComponent(s)}/decision`)
-        .then(v => setData(prev => (prev && prev.ticker===s) ? {...prev, ai_decision:v} : prev))
-        .catch(()=>{})
-        .finally(()=>{ if (verdictTickerRef.current===s) setVerdictLoading(false); });
+      // The AI Decision costs a real API call, so it's opt-in — requested
+      // explicitly via a button on Analyze (see requestDecision below)
+      // rather than fired automatically on every ticker lookup.
     }
     catch(e){ setErr(e.message); } finally { setBusy(false); }
   },[]);
+
+  const requestDecision = useCallback(async () => {
+    const s = data?.ticker;
+    if (!s || verdictLoading) return;
+    setVerdictLoading(true);
+    verdictTickerRef.current = s;
+    try {
+      const v = await api(`/api/analyze/${encodeURIComponent(s)}/decision`);
+      setData(prev => (prev && prev.ticker===s) ? {...prev, ai_decision:v} : prev);
+    } catch {}
+    finally { if (verdictTickerRef.current===s) setVerdictLoading(false); }
+  },[data, verdictLoading]);
 
   const dispatch = useCallback(a => {
     switch(a.type){
@@ -2190,7 +2203,7 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,theme,setTheme};
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme};
 
   return <>
     <div className="shell">
