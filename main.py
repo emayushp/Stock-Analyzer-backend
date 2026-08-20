@@ -664,10 +664,19 @@ def generate_signal(
 
 
 def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
-    if hist is None or hist.empty or len(hist) < 30:
+    """
+    Below 30 rows this degrades rather than blocks: RSI needs 14 warm-up bars
+    (min_periods=14) so it comes back None on a very new listing, and
+    generate_signal() already treats a None RSI/MACD as "not enough data for
+    a signal" (HOLD/Low, see below) rather than crashing — so a recently
+    listed security (a new NEO/.NE CDR is the common real case) still shows
+    whatever price/chart data actually exists instead of erroring out
+    entirely. Only truly empty history has nothing to compute.
+    """
+    if hist is None or hist.empty:
         raise HTTPException(
             status_code=422,
-            detail="Not enough price history to compute reliable indicators (need 30+ trading days).",
+            detail="No price history available for this ticker yet.",
         )
 
     close = hist["Close"]
@@ -682,6 +691,11 @@ def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
 
     volume_ratio = compute_volume_ratio(hist)
     signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
+    if len(hist) < 30:
+        reasoning = (
+            f"Only {len(hist)} trading day(s) of price history available, likely a recently "
+            f"listed security — indicators need more history to be reliable. " + reasoning
+        )
 
     # Look for a divergence in the recent past. Only the last ~30 bars are
     # considered "current" — an older one has usually already played out.
@@ -1196,10 +1210,15 @@ def analyze_sentiment(headlines: List[dict]) -> SentimentAnalysis:
 def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """Shared technical-scoring logic for one ticker's OHLCV history, used by
     both the batched pass and the single-ticker retry below. Returns None
-    (rather than an error dict) when there's not enough usable data — the
-    caller decides what that means in context."""
+    (rather than an error dict) only when there's truly no usable data —
+    the caller decides what that means in context.
+
+    Below 30 rows this degrades rather than returns None: RSI/MACD come back
+    None (same graceful path as compute_technicals) and the caller still
+    gets a price to show current-value-vs-cost-basis for a recently listed
+    holding, rather than a hard "not enough history" error blocking the row."""
     df = df.dropna(how="all")
-    if df.empty or len(df) < 30:
+    if df.empty:
         return None
 
     close = df["Close"].dropna()
@@ -1215,6 +1234,8 @@ def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     volume_ratio = compute_volume_ratio(df)
 
     signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
+    if len(df) < 30:
+        reasoning = f"Only {len(df)} trading day(s) available, likely a recently listed security. " + reasoning
 
     price = round(float(close.iloc[-1]), 2)
     change_pct = None
