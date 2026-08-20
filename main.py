@@ -22,11 +22,14 @@ import numpy as np
 import pandas as pd
 import torch
 import yfinance as yf
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
+
+import auth as auth_lib
+import db as db_lib
 
 # Fewer threads = less memory overhead from torch's internal thread pool.
 torch.set_num_threads(1)
@@ -4040,3 +4043,157 @@ def backtest_conviction_endpoint(ticker: str, period: str = "5y"):
     if period not in ("2y", "5y", "10y"):
         period = "5y"
     return backtest_conviction(ticker, period)
+
+
+# ---------------------------------------------------------------------------
+# Cross-device sync (optional). Everything above this point works with zero
+# database — holdings, watchlist, journal, etc. all live client-side in
+# localStorage/AsyncStorage. This section adds an opt-in account layer so
+# the same data can follow a person across devices: email+password auth
+# (see auth.py) plus a generic per-user key-value store (see db.py) keyed
+# by the exact same names the client already uses for its own local store,
+# so syncing a key is just "push this value" / "pull all values," not a
+# bespoke schema per feature. If DATABASE_URL/JWT_SECRET aren't set, every
+# endpoint below 503s and the rest of the app is completely unaffected.
+# ---------------------------------------------------------------------------
+SYNC_ALLOWED_KEYS = {
+    "ma_portfolio", "ma_watchlist", "ma_cash", "ma_journal", "ma_activity",
+    "ma_scan_tickers", "ma_risk_pct", "ma_currency", "ma_ai_decisions",
+}
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    email: str
+
+
+class MeResponse(BaseModel):
+    email: str
+
+
+class SyncSetRequest(BaseModel):
+    value: Any
+
+
+class SyncGetResponse(BaseModel):
+    data: Dict[str, Any]
+
+
+def _sync_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail="Cross-device sync isn't configured on this server yet.")
+
+
+def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """FastAPI dependency: verifies the bearer token and returns {"id", "email"}
+    for the logged-in user, or raises. Extracts what's needed before closing
+    the session rather than returning the ORM object itself, which would be
+    detached (and its attributes unsafe to touch) once the session closes."""
+    if db_lib.get_engine() is None:
+        raise _sync_unavailable()
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+    user_id = auth_lib.decode_token(authorization[len("Bearer "):])
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token. Please sign in again.")
+    session = db_lib.get_session()
+    try:
+        user = session.get(db_lib.User, user_id)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token. Please sign in again.")
+        return {"id": user.id, "email": user.email}
+    finally:
+        session.close()
+
+
+@app.post("/api/auth/signup", response_model=AuthResponse)
+def signup(request: SignupRequest):
+    if db_lib.get_engine() is None:
+        raise _sync_unavailable()
+    email = request.email.strip().lower()
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if len(request.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    session = db_lib.get_session()
+    try:
+        if session.query(db_lib.User).filter(db_lib.User.email == email).first():
+            raise HTTPException(status_code=409, detail="An account with this email already exists — try logging in instead.")
+        user = db_lib.User(email=email, password_hash=auth_lib.hash_password(request.password))
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        token = auth_lib.create_token(user.id)
+        if token is None:
+            raise _sync_unavailable()
+        return AuthResponse(token=token, email=user.email)
+    finally:
+        session.close()
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+def login(request: LoginRequest):
+    if db_lib.get_engine() is None:
+        raise _sync_unavailable()
+    email = request.email.strip().lower()
+    session = db_lib.get_session()
+    try:
+        user = session.query(db_lib.User).filter(db_lib.User.email == email).first()
+        if user is None or not auth_lib.verify_password(request.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Incorrect email or password.")
+        token = auth_lib.create_token(user.id)
+        if token is None:
+            raise _sync_unavailable()
+        return AuthResponse(token=token, email=user.email)
+    finally:
+        session.close()
+
+
+@app.get("/api/auth/me", response_model=MeResponse)
+def me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    return MeResponse(email=current_user["email"])
+
+
+@app.get("/api/sync", response_model=SyncGetResponse)
+def sync_get_all(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Pulls every synced key for the logged-in user in one call — used both
+    on login (to populate a fresh device) and on app start (to refresh)."""
+    session = db_lib.get_session()
+    try:
+        rows = session.query(db_lib.UserData).filter(db_lib.UserData.user_id == current_user["id"]).all()
+        return SyncGetResponse(data={row.key: row.value for row in rows})
+    finally:
+        session.close()
+
+
+@app.put("/api/sync/{key}")
+def sync_set_key(key: str, request: SyncSetRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Upserts one key's value — called on every local store.set() once the
+    person is logged in, mirroring the client's own store.get/set(key, value)
+    shape exactly."""
+    if key not in SYNC_ALLOWED_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown sync key '{key}'.")
+    session = db_lib.get_session()
+    try:
+        row = session.query(db_lib.UserData).filter(
+            db_lib.UserData.user_id == current_user["id"], db_lib.UserData.key == key,
+        ).first()
+        if row:
+            row.value = request.value
+            row.updated_at = datetime.now(timezone.utc)
+        else:
+            row = db_lib.UserData(user_id=current_user["id"], key=key, value=request.value)
+            session.add(row)
+        session.commit()
+        return {"ok": True}
+    finally:
+        session.close()
