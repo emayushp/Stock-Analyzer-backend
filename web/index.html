@@ -3,134 +3,249 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0B0D0C">
+<meta id="theme-color-light" name="theme-color" content="#F7F7FB" media="(prefers-color-scheme: light)">
+<meta id="theme-color-dark" name="theme-color" content="#0F1216" media="(prefers-color-scheme: dark)">
 <title>Market Analyzer</title>
 <link rel="icon" href="/static/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+// Applied before first paint so there's no flash of the wrong theme.
+// "system" (the default) tracks the OS/browser preference live; an explicit
+// choice pins data-theme and wins over the media query (see CSS below).
+// Also pins the theme-color meta tags to match, since those normally follow
+// prefers-color-scheme on their own and won't otherwise reflect an override.
+(function(){
+  try{
+    var saved = localStorage.getItem("ma_theme");
+    if (saved === "light" || saved === "dark") {
+      document.documentElement.setAttribute("data-theme", saved);
+      var color = saved === "dark" ? "#0F1216" : "#F7F7FB";
+      document.getElementById("theme-color-light").setAttribute("content", color);
+      document.getElementById("theme-color-dark").setAttribute("content", color);
+    }
+  }catch(e){}
+})();
+</script>
 <style>
 /* ---------------------------------------------------------------------------
-   Precision-instrument theme, matching the mobile app.
-   Green and red are reserved strictly for money moving — never decoration.
-   All measured values are monospace so figures align in columns.
+   Bold, colorful consumer-fintech theme. Light by default; dark tracks the
+   OS/browser preference unless the person picks one explicitly in Settings
+   (see the inline script in <head> and [data-theme] overrides below).
+   Green/red stay reserved for money moving; violet ("ai") marks anything
+   Claude-generated, distinct from the app's own mechanical signals.
 --------------------------------------------------------------------------- */
 :root{
-  --bg:#0B0D0C; --card:#131715; --cardAlt:#181E1B; --border:#242B27; --borderLit:#333D37;
-  --text:#E9E7E2; --muted:#8B948D; --faint:#5A635C;
-  --accent:#CEA04E; --accentDim:#8E6E36;
-  --green:#4FA882; --red:#C4574C; --amber:#D9A441;
+  --bg:#F7F7FB; --card:#FFFFFF; --cardAlt:#FFFFFF; --border:#F1F5F9; --borderLit:#E6E9F2;
+  --text:#0F172A; --muted:#8892A6; --faint:#B7BECC;
+  --accent:#7C3AED; --accentDim:#5B21B6; --accentBg:#EDE4FF;
+  --green:#10B981; --greenBg:#D1FAE5; --greenText:#047857;
+  --red:#F43B5D; --redBg:#FFE1E7; --redText:#BE123C;
+  --amber:#D97706; --amberBg:#FEF3C7; --amberText:#B45309;
+  --holdBg:#F1F5F9; --holdText:#64748B;
+  --shadow-soft:0 2px 10px rgba(20,20,43,.07);
+  --shadow-card:0 8px 24px rgba(20,20,43,.09);
+  --shadow-pop:0 10px 30px rgba(124,58,237,.22);
+  --r-lg:22px; --r-md:16px; --r-sm:10px;
+  --sidebar-w:252px;
+  --font-display:'Manrope',-apple-system,sans-serif; --font-sans:'Inter',-apple-system,sans-serif;
   --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
 }
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F1216; --card:#171B21; --cardAlt:#1B2028; --border:#262C35; --borderLit:#333A46;
+    --text:#F1F5F9; --muted:#8B96A5; --faint:#525C6B;
+    --accent:#A78BFA; --accentDim:#8B5CF6; --accentBg:rgba(167,139,250,.16);
+    --green:#34D399; --greenBg:rgba(52,211,153,.15); --greenText:#6EE7B7;
+    --red:#FB7185; --redBg:rgba(251,113,133,.15); --redText:#FDA4AF;
+    --amber:#FBBF24; --amberBg:rgba(251,191,36,.15); --amberText:#FCD34D;
+    --holdBg:#262C35; --holdText:#9AA5B5;
+    --shadow-soft:0 2px 10px rgba(0,0,0,.35);
+    --shadow-card:0 10px 28px rgba(0,0,0,.45);
+    --shadow-pop:0 12px 32px rgba(124,58,237,.4);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F1216; --card:#171B21; --cardAlt:#1B2028; --border:#262C35; --borderLit:#333A46;
+  --text:#F1F5F9; --muted:#8B96A5; --faint:#525C6B;
+  --accent:#A78BFA; --accentDim:#8B5CF6; --accentBg:rgba(167,139,250,.16);
+  --green:#34D399; --greenBg:rgba(52,211,153,.15); --greenText:#6EE7B7;
+  --red:#FB7185; --redBg:rgba(251,113,133,.15); --redText:#FDA4AF;
+  --amber:#FBBF24; --amberBg:rgba(251,191,36,.15); --amberText:#FCD34D;
+  --holdBg:#262C35; --holdText:#9AA5B5;
+  --shadow-soft:0 2px 10px rgba(0,0,0,.35);
+  --shadow-card:0 10px 28px rgba(0,0,0,.45);
+  --shadow-pop:0 12px 32px rgba(124,58,237,.4);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+body{background:var(--bg);color:var(--text);font:15px/1.5 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}
+.wrap{max-width:1240px;margin:0 auto;padding:0 32px 80px}
+h1{font:800 26px/1.2 var(--font-display);letter-spacing:-.4px;margin:28px 0 4px}
+.tag{font-size:12.5px;color:var(--muted);font-weight:500}
 
-/* header */
-header{position:sticky;top:0;z-index:50;background:rgba(11,13,12,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
-.hdr{max-width:1180px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px}
-.logo{width:42px;height:42px;border-radius:10px;background:var(--cardAlt);border:1px solid var(--borderLit);display:flex;align-items:center;justify-content:center;flex-shrink:0}
-h1{font-size:19px;font-weight:700;letter-spacing:-.3px}
-.tag{font-size:11.5px;color:var(--muted);margin-top:2px}
-nav{margin-left:auto;display:flex;gap:4px}
-nav button{background:none;border:none;color:var(--muted);font:600 12.5px/1 inherit;letter-spacing:.6px;text-transform:uppercase;padding:9px 13px;border-radius:7px;cursor:pointer;transition:.15s}
-nav button:hover{color:var(--text);background:var(--card)}
-nav button.on{color:var(--accent);background:rgba(206,160,78,.1)}
+/* app shell: fixed left sidebar + scrolling main */
+.shell{display:flex;min-height:100vh}
+.sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--card);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.sidebar .brand{padding:24px 22px;display:flex;align-items:center;gap:10px}
+.sidebar .brand .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,#7C3AED,#4F46E5);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:var(--shadow-pop)}
+.sidebar .brand h1{font:800 17px/1 var(--font-display);letter-spacing:-.3px;margin:0}
+.sidebar .brand h1 span{color:var(--accent)}
+.sidebar nav{flex:1;padding:8px 12px;display:flex;flex-direction:column;gap:3px;overflow-y:auto}
+.sidebar nav button{display:flex;align-items:center;gap:11px;background:none;border:none;color:var(--muted);
+  font:600 13.5px/1 var(--font-sans);padding:11px 13px;border-radius:12px;cursor:pointer;text-align:left;transition:.12s}
+.sidebar nav button:hover{background:var(--bg);color:var(--text)}
+.sidebar nav button.on{background:var(--accentBg);color:var(--accent);font-weight:700}
+.sidebar nav button svg{width:17px;height:17px;flex-shrink:0}
+.sidebar .promo{margin:14px;padding:16px;border-radius:var(--r-md);color:#fff;
+  background:linear-gradient(135deg,#7C3AED,#4F46E5)}
+.sidebar .promo b{font-size:12.5px;display:block;margin-bottom:4px}
+.sidebar .promo p{font-size:11px;opacity:.85;line-height:1.5}
+@media(max-width:880px){
+  .shell{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static;border-right:none;border-bottom:1px solid var(--border)}
+  .sidebar nav{flex-direction:row;overflow-x:auto}
+  .sidebar .promo{display:none}
+  .wrap{padding:0 18px 60px}
+}
 
 /* search */
 .searchbar{display:flex;gap:9px;margin:22px 0 18px;position:relative}
-input,select,textarea{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px 15px;color:var(--text);font:15px inherit;width:100%;outline:none}
-input:focus,textarea:focus{border-color:var(--accentDim)}
-.btn{background:var(--accent);color:var(--bg);border:none;border-radius:9px;padding:12px 22px;font:700 14px/1 inherit;cursor:pointer;white-space:nowrap;transition:.15s}
-.btn:hover{filter:brightness(1.08)}
-.btn:disabled{opacity:.5;cursor:default}
-.btn.ghost{background:none;border:1px solid rgba(206,160,78,.4);color:var(--accent)}
-.btn.sm{padding:8px 14px;font-size:12.5px}
-.sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--borderLit);border-radius:11px;overflow:hidden;z-index:40;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+input,select,textarea{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 15px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none;transition:.12s}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accentBg)}
+.btn{background:linear-gradient(135deg,#7C3AED,#6D28D9);color:#fff;border:none;border-radius:var(--r-sm);padding:12px 22px;font:700 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:.15s;box-shadow:var(--shadow-pop)}
+.btn:hover{filter:brightness(1.06)}
+.btn:disabled{opacity:.5;cursor:default;box-shadow:none}
+.btn.ghost{background:var(--card);border:1px solid var(--border);color:var(--muted);box-shadow:var(--shadow-soft)}
+.btn.ghost:hover{color:var(--text)}
+.btn.sm{padding:9px 15px;font-size:12.5px}
+.sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--borderLit);border-radius:var(--r-md);overflow:hidden;z-index:40;box-shadow:var(--shadow-card)}
 .sugg div{padding:11px 15px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .sugg div:first-child{border-top:none}
-.sugg div:hover{background:var(--cardAlt)}
+.sugg div:hover{background:var(--bg)}
 .sugg b{font-size:14px}
 .sugg span{color:var(--muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--border);padding:3px 7px;border-radius:4px}
 
 /* cards + grid */
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;align-items:start}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:17px;margin-bottom:14px}
-.card.alt{background:var(--cardAlt);border-color:var(--borderLit);border-radius:14px}
-.card h2{font-size:15.5px;font-weight:700;letter-spacing:-.2px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-.lbl{font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;font-weight:700;color:var(--faint)}
-.row{display:flex;justify-content:space-between;padding:6px 0;gap:12px;font-size:12.5px}
-.row span:first-child{color:var(--muted)}
-.row span:last-child{font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
-.rule{height:1px;background:var(--border);margin:12px 0}
-.note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px;font-style:italic}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px;align-items:start}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.card.alt{background:var(--card);border-color:var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-card)}
+.card h2{font:700 15.5px/1 var(--font-display);letter-spacing:-.1px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.lbl{font-size:9.5px;letter-spacing:1.2px;text-transform:uppercase;font-weight:700;color:var(--faint)}
+.row{display:flex;justify-content:space-between;padding:7px 0;gap:12px;font-size:12.5px}
+.row span:first-child{color:var(--muted);font-weight:500}
+.row span:last-child{font-weight:700;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.rule{height:1px;background:var(--border);margin:14px 0}
+.note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px}
 .plain{font-size:13.5px;line-height:1.6}
 .dim{color:var(--muted)}
 .mut{color:var(--muted);font-size:12.5px;line-height:1.55}
 
-/* signal readout — the signature element */
-.readout{background:var(--cardAlt);border:1px solid;border-radius:14px;padding:18px;margin-bottom:14px}
+/* hero gradient stat cards — the signature element */
+.hero{position:relative;overflow:hidden;border-radius:28px;color:#fff;padding:32px;margin-bottom:18px;box-shadow:var(--shadow-pop)}
+.hero.emerald{background:linear-gradient(135deg,#10B981,#0D9488)}
+.hero.violet{background:linear-gradient(135deg,#6D28D9,#4338CA)}
+.hero::before{content:"";position:absolute;right:-40px;top:-64px;width:280px;height:280px;border-radius:50%;background:rgba(255,255,255,.1)}
+.hero::after{content:"";position:absolute;left:30%;bottom:-96px;width:240px;height:240px;border-radius:50%;background:rgba(255,255,255,.06)}
+.hero-body{position:relative;display:flex;flex-wrap:wrap;gap:24px}
+.hero-main{flex:1.4;min-width:220px}
+.hero-main .k{font-size:13px;font-weight:500;opacity:.9;margin-bottom:8px}
+.hero-main .v{font:800 42px/1 var(--font-display);letter-spacing:-.5px}
+.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.2);padding:5px 11px;border-radius:9px;font-size:13px;font-weight:700;margin-top:10px}
+.hero-side{min-width:120px}
+.hero-side .k{font-size:11px;font-weight:600;opacity:.8;margin-bottom:4px}
+.hero-side .v{font:700 22px/1.2 var(--font-display)}
+
+/* verdict/gauge — kept for backwards compat with any inline usage */
+.readout{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
 .readout .top{display:flex;justify-content:space-between;align-items:flex-start}
-.verdict{font:700 42px/1 var(--mono);letter-spacing:2px;margin-top:6px}
+.verdict{font:800 40px/1 var(--font-display);letter-spacing:-.5px;margin-top:6px}
 .meter{display:flex;align-items:flex-end;height:14px;gap:3px;justify-content:flex-end}
-.seg{width:4px;border-radius:1px;background:var(--border)}
-.grad{margin:14px 0 12px}
-.gradline{height:1px;background:var(--borderLit)}
-.gradticks{display:flex;justify-content:space-between}
-.gradticks i{width:1px;height:3px;background:var(--border)}
-.gradticks i:nth-child(4n+1){height:6px;background:var(--borderLit)}
+.seg{width:5px;border-radius:2px;background:var(--border)}
+.grad{margin:16px 0 14px}
+.gradline{height:2px;border-radius:1px;background:var(--border)}
+.gradticks{display:flex;justify-content:space-between;margin-top:-2px}
+.gradticks i{width:2px;height:4px;background:var(--border);display:block}
+.gradticks i:nth-child(4n+1){height:8px;background:var(--borderLit)}
 .stats3{display:flex;gap:16px}
 .stats3 div{flex:1}
-.stats3 b{display:block;font:600 15px var(--mono);margin-top:4px}
+.stats3 b{display:block;font:700 15px var(--font-display);margin-top:4px}
+
+/* AI badge — marks anything Claude-generated */
+.ai-badge-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.ai-badge{background:var(--accentBg);color:var(--accent);font:800 10px/1 var(--font-sans);letter-spacing:.5px;padding:5px 9px;border-radius:7px}
+
+/* gauge (circular conviction score) */
+.gauge-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
+.gauge{position:relative;width:168px;height:168px}
+.gauge svg{width:100%;height:100%;transform:rotate(-90deg)}
+.gauge .num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.gauge .num b{font:800 44px/1 var(--font-display)}
+.gauge .num span{font-size:11px;opacity:.75;margin-top:3px}
+.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);padding:8px 15px;border-radius:11px;font:700 13px/1 var(--font-sans)}
 
 /* banners */
-.banner{background:var(--card);border-left:3px solid;border-radius:10px;padding:13px;margin-bottom:14px}
+.banner{background:var(--card);border:1px solid var(--border);border-left:4px solid;border-radius:var(--r-sm);padding:14px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
 .banner p{font-size:12px;line-height:1.55;margin-top:6px}
-.pill{border:1px solid;border-radius:6px;padding:5px 11px;font:700 12px/1 inherit;letter-spacing:1px}
-.mini{border:1px solid;border-radius:4px;padding:3px 7px;font:700 9px/1 inherit;letter-spacing:.9px}
+.pill{border:1px solid;border-radius:8px;padding:5px 12px;font:700 12px/1 var(--font-sans)}
+.mini{border:1px solid transparent;border-radius:6px;padding:4px 9px;font:800 10px/1 var(--font-sans);letter-spacing:.3px}
 
 /* chart */
 .ranges{display:flex;gap:6px;margin:16px 0 10px;flex-wrap:wrap}
-.ranges button{background:none;border:none;color:var(--muted);font:700 11.5px/1 inherit;padding:6px 11px;border-radius:7px;cursor:pointer}
-.ranges button.on{background:rgba(206,160,78,.14);color:var(--accent)}
+.ranges button{background:none;border:none;color:var(--muted);font:700 11.5px/1 var(--font-sans);padding:6px 12px;border-radius:8px;cursor:pointer}
+.ranges button.on{background:var(--accentBg);color:var(--accent)}
 svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 
 /* lists */
-.srow{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--border);cursor:pointer}
+.srow{display:flex;align-items:center;gap:12px;padding:11px 8px;border-radius:12px;cursor:pointer;transition:.1s}
+.srow:hover{background:var(--bg)}
 .srow:hover b{color:var(--accent)}
 .srow b{font-size:14px}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
 .prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-radius:10px;background:var(--card);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
+.hl{border-radius:var(--r-sm);background:var(--bg);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
 .hl .t{font-size:13px;line-height:1.45;margin-top:5px}
 .hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.45}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-.chip{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:7px 14px;font:600 12.5px/1 inherit;color:var(--muted);cursor:pointer;font-family:var(--mono)}
-.chip.on{border-color:rgba(206,160,78,.5);background:rgba(206,160,78,.09);color:var(--accent)}
-.link{color:var(--accent);font:700 12px/1 inherit;cursor:pointer;background:none;border:none;padding:0}
+.chip{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px 15px;font:700 12.5px/1 var(--font-sans);color:var(--muted);cursor:pointer;box-shadow:var(--shadow-soft)}
+.chip.on{background:var(--text);border-color:var(--text);color:var(--bg)}
+.link{color:var(--accent);font:700 12px/1 var(--font-sans);cursor:pointer;background:none;border:none;padding:0}
 .center{text-align:center;padding:56px 20px;color:var(--muted)}
-.center h3{color:var(--text);font-size:16px;margin-bottom:7px}
-.err{background:rgba(196,87,76,.1);border:1px solid rgba(196,87,76,.35);border-radius:11px;padding:14px;margin-bottom:14px}
-.err b{color:var(--red);display:block;margin-bottom:4px;font-size:14px}
+.center h3{color:var(--text);font-size:16px;margin-bottom:7px;font-family:var(--font-display)}
+.err{background:var(--redBg);border:1px solid var(--red);border-radius:var(--r-sm);padding:14px;margin-bottom:16px}
+.err b{color:var(--redText);display:block;margin-bottom:4px;font-size:14px}
 .exp{margin-top:12px}
-.expbody{background:rgba(206,160,78,.06);border-left:2px solid rgba(206,160,78,.4);border-radius:8px;padding:12px;margin-top:9px;font-size:12.5px;line-height:1.65}
-.spin{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
+.expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:var(--r-sm);padding:13px;margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--text)}
+.spin{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
-.big{font:700 36px/1 var(--mono);letter-spacing:-.5px}
-.chg{font:700 13.5px var(--mono);margin-top:6px}
+.big{font:800 36px/1 var(--font-display);letter-spacing:-.5px}
+.chg{font:700 13.5px var(--font-sans);margin-top:6px}
 .split{display:flex;gap:16px;margin:10px 0}
 .split div{flex:1}
-.split b{display:block;font:700 19px var(--mono);margin-top:4px}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
-.modal .box{background:var(--bg);border:1px solid var(--borderLit);border-radius:16px;padding:22px;max-width:520px;width:100%;max-height:88vh;overflow:auto}
-.opt{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px;margin-top:8px;cursor:pointer}
-.opt.on{border-color:rgba(206,160,78,.6);background:rgba(206,160,78,.08)}
+.split b{display:block;font:700 19px var(--font-display);margin-top:4px}
+.modal{position:fixed;inset:0;background:rgba(15,17,22,.6);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal .box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:24px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-card)}
+.opt{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-top:8px;cursor:pointer}
+.opt.on{border-color:var(--accent);background:var(--accentBg)}
 .opt b{display:block;font-size:14px}
 .opt span{color:var(--muted);font-size:11.5px}
-@media(max-width:720px){.hdr{flex-wrap:wrap}nav{width:100%;margin:8px 0 0;overflow-x:auto}.grid{grid-template-columns:1fr}}
+
+/* badges: BUY / SELL / HOLD, ticker avatars — used across screens */
+.sig-badge{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:9px;font:800 11px/1 var(--font-sans)}
+.sig-badge.buy{background:var(--greenBg);color:var(--greenText)}
+.sig-badge.sell{background:var(--redBg);color:var(--redText)}
+.sig-badge.hold{background:var(--holdBg);color:var(--holdText)}
+.avatar{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font:800 11px/1 var(--font-sans);flex-shrink:0}
+
+@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding:22px;border-radius:22px}.hero-main .v{font-size:32px}}
 </style>
 </head>
 <body>
@@ -148,9 +263,23 @@ const store = {
 };
 
 const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
-const TABS = [["analyze","Analyze"],["portfolio","Portfolio"],["activity","Activity"],["brief","Brief"],
-  ["journal","Journal"],["screener","Screener"],["learn","Learn"],["settings","Settings"]];
-const TAB_LABELS = Object.fromEntries(TABS);
+const TABS = [["portfolio","Portfolio","pie"],["analyze","Analyze","search"],["brief","Brief","sun"],
+  ["screener","Screener","filter"],["activity","Activity","book"],["journal","Journal","note"],
+  ["learn","Learn","cap"],["settings","Settings","gear"]];
+const TAB_LABELS = Object.fromEntries(TABS.map(([k,l])=>[k,l]));
+const NAV_ICON_PATHS = {
+  pie: "M12 2v10h10a10 10 0 1 1-10-10Z M22 12A10 10 0 0 0 12 2v10Z",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM21 21l-4.35-4.35",
+  sun: "M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4",
+  filter: "M4 5h16M7 12h10M10 19h4",
+  book: "M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5v-17ZM20 19H6.5A2.5 2.5 0 0 0 4 21.5",
+  note: "M6 2h9l5 5v15H6z M15 2v5h5 M9 12h6 M9 16h6",
+  cap: "M2 9 12 4l10 5-10 5-10-5Z M6 11v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5",
+  gear: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1",
+};
+const NavIcon = ({name}) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <path d={NAV_ICON_PATHS[name] || ""}/>
+</svg>;
 const SENT = { positive:"var(--green)", negative:"var(--red)", neutral:"var(--muted)" };
 const fmt = n => n == null ? "—" : Number(n).toLocaleString();
 const pct = n => n == null ? "—" : `${n >= 0 ? "+" : ""}${n}%`;
@@ -410,13 +539,17 @@ async function api(path, opts) {
   return j;
 }
 
-function Logo() {
+function Logo({light}) {
   const h = [9,15,12,22];
-  return <svg width="30" height="26" viewBox="0 0 34 30">
+  const bar = light ? "rgba(255,255,255,.85)" : "var(--accentDim)";
+  const barTop = light ? "#fff" : "var(--accent)";
+  const base = light ? "#fff" : "var(--text)";
+  const tick = light ? "rgba(255,255,255,.6)" : "var(--faint)";
+  return <svg width="20" height="18" viewBox="0 0 34 30">
     {h.map((v,i)=><rect key={i} x={2.4+i*7.8} y={25-v} width="5.2" height={v} rx="1.1"
-      fill={i===3?"var(--accent)":"var(--accentDim)"}/>)}
-    <rect x="0" y="25" width="34" height="1.8" rx=".9" fill="var(--text)"/>
-    {[0,1,2,3,4,5,6].map(i=><rect key={i} x={i*5.4+.4} y="27.4" width="1.1" height="3" rx=".5" fill="var(--faint)"/>)}
+      fill={i===3?barTop:bar}/>)}
+    <rect x="0" y="25" width="34" height="1.8" rx=".9" fill={base}/>
+    {[0,1,2,3,4,5,6].map(i=><rect key={i} x={i*5.4+.4} y="27.4" width="1.1" height="3" rx=".5" fill={tick}/>)}
   </svg>;
 }
 
@@ -745,10 +878,6 @@ function EarningsTrack({quarters}) {
 }
 
 /* ===== Analyze ===== */
-function scoreColor(score) {
-  return score>=65 ? "var(--green)" : score<40 ? "var(--red)" : "var(--amber)";
-}
-
 function Analyze({state, dispatch}) {
   const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading} = state;
   const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
@@ -800,7 +929,7 @@ function Analyze({state, dispatch}) {
           <div style={{flex:1}}>
             <div style={{display:"flex",alignItems:"center",gap:9}}>
               <b className="num" style={{fontSize:21}}>{data.ticker}</b>
-              <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{data.market}</span>
+              <span className="mini" style={{color:"var(--accent)",background:"var(--accentBg)"}}>{data.market}</span>
             </div>
             <div className="mut" style={{marginTop:4}}>{data.company_name}</div>
           </div>
@@ -820,37 +949,56 @@ function Analyze({state, dispatch}) {
 
       {verdictLoading && !decision && <div className="card alt">
         <div style={{display:"flex",alignItems:"center",gap:9}}>
-          <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
+          <span className="ai-badge">AI</span>
           <span className="mut">Scoring the setup…</span>
         </div>
       </div>}
-      {decision && <div className="card alt">
-        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:14}}>
-          <span className="mini" style={{color:"var(--accent)",borderColor:"var(--accent)66",background:"var(--accent)1F"}}>AI</span>
-          <h2 style={{marginBottom:0}}>Decision</h2>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:16}}>
-          <div style={{fontSize:40,fontWeight:800,color:scoreColor(decision.conviction_score),lineHeight:1}}>
-            {decision.conviction_score}
+      {decision && (()=>{
+        const R = 76, C = 2*Math.PI*R, score = decision.conviction_score;
+        const strokeColor = score>=65 ? "#6EE7B7" : score<40 ? "#FDA4AF" : "#FCD34D";
+        return <div className="hero violet">
+          <div className="ai-badge-row" style={{position:"relative"}}>
+            <span className="ai-badge" style={{background:"rgba(255,255,255,.18)",color:"#fff"}}>✨ AI DECISION ENGINE</span>
           </div>
-          <div>
-            <b style={{fontSize:15}}>{decision.conviction_label}</b>
-            <div style={{height:6,borderRadius:3,background:"var(--border)",overflow:"hidden",marginTop:7,width:130}}>
-              <div style={{height:"100%",width:`${decision.conviction_score}%`,background:scoreColor(decision.conviction_score)}}/>
+          <div className="hero-body" style={{position:"relative",alignItems:"center"}}>
+            <div className="gauge-wrap">
+              <div className="gauge">
+                <svg viewBox="0 0 176 176">
+                  <circle cx="88" cy="88" r={R} fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="14"/>
+                  <circle cx="88" cy="88" r={R} fill="none" stroke={strokeColor} strokeWidth="14" strokeLinecap="round"
+                    strokeDasharray={C} strokeDashoffset={C*(1-score/100)}/>
+                </svg>
+                <div className="num"><b>{score}</b><span>out of 100</span></div>
+              </div>
+              <div className="gauge-tag">{decision.conviction_label}</div>
+            </div>
+            <div style={{flex:1,minWidth:240}}>
+              {decision.entry != null && <div style={{display:"grid",
+                gridTemplateColumns:`repeat(${decision.risk_reward_ratio!=null?4:3},1fr)`,gap:10,marginBottom:14}}>
+                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Entry</div>
+                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                </div>
+                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
+                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FDA4AF"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                </div>
+                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
+                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#6EE7B7"}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                </div>
+                {decision.risk_reward_ratio != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
+                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FCD34D"}}>{decision.risk_reward_ratio} : 1</div>
+                </div>}
+              </div>}
+              {decision.rationale && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:14,fontSize:13,lineHeight:1.55}}>
+                {decision.rationale}
+              </div>}
             </div>
           </div>
-        </div>
-        {decision.entry != null && <>
-          <div className="rule"/>
-          <Row l="Entry" v={`${decision.entry} ${data.currency}`}/>
-          <div className="split">
-            <div><div className="lbl">Stop-Loss</div><b style={{color:"var(--red)"}}>{decision.stop_loss}</b></div>
-            <div><div className="lbl">Take-Profit</div><b style={{color:"var(--green)"}}>{decision.take_profit}</b></div>
-          </div>
-          {decision.risk_reward_ratio != null && <Row l="Reward : Risk" v={`${decision.risk_reward_ratio} : 1`}/>}
-        </>}
-        {decision.rationale && <p className="note" style={{marginTop:10}}>{decision.rationale}</p>}
-      </div>}
+        </div>;
+      })()}
 
       <Readout t={data.technical_analysis}/>
 
@@ -1003,6 +1151,22 @@ function HeldCard({h,d,pv}) {
 }
 
 /* ===== Portfolio ===== */
+// Deterministic gradient per ticker, so avatars stay colorful and varied
+// without needing a hand-maintained per-symbol color list.
+const AVATAR_GRADIENTS = [
+  ["#FB923C","#EF4444"], ["#38BDF8","#2563EB"], ["#818CF8","#7C3AED"],
+  ["#FB7185","#E11D48"], ["#34D399","#0D9488"], ["#64748B","#334155"],
+  ["#FBBF24","#EA580C"], ["#22D3EE","#0891B2"],
+];
+function tickerGradient(t) {
+  let h = 0;
+  for (let i = 0; i < (t||"").length; i++) h = (h*31 + t.charCodeAt(i)) | 0;
+  const [a,b] = AVATAR_GRADIENTS[Math.abs(h) % AVATAR_GRADIENTS.length];
+  return `linear-gradient(135deg,${a},${b})`;
+}
+const Avatar = ({t}) => <div className="avatar" style={{background:tickerGradient(t)}}>{(t||"").replace(/\..*/,"").slice(0,4)}</div>;
+const SigBadge = ({sig}) => <span className={"sig-badge "+(sig==="BUY"?"buy":sig==="SELL"?"sell":"hold")}>{sig}</span>;
+
 function Portfolio({state, dispatch}) {
   const {holdings, cash} = state;
   const [res,setRes] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
@@ -1102,11 +1266,12 @@ function Portfolio({state, dispatch}) {
   }) : [];
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
-      <div style={{flex:1}}><h1>Portfolio</h1><div className="tag">Your holdings · live P/L · signals</div></div>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+      <div style={{flex:1}}><h1>Portfolio</h1>
+        <div className="tag" style={{marginTop:3}}>Your holdings · live P/L · signals</div></div>
       <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
       <button className="btn sm ghost" onClick={()=>fileRef.current.click()}>Import from Wealthsimple (CSV)</button>
-      <button className="btn sm ghost" onClick={()=>{setCashOpen(false);setAdd(!add);}}>{add?"Cancel":"+ Stock"}</button>
+      <button className="btn sm" onClick={()=>{setCashOpen(false);setAdd(!add);}}>{add?"Cancel":"+ Stock"}</button>
       <button className="btn sm ghost" onClick={()=>{setAdd(false);setCashOpen(!cashOpen);}}>{cashOpen?"Cancel":"+ Cash"}</button>
     </div>
 
@@ -1144,27 +1309,30 @@ function Portfolio({state, dispatch}) {
       <h3>No holdings yet</h3><p>Add what you own to track profit/loss and get momentum signals on each position.</p></div>}
 
     {!busy && (holdings.length>0 || cash!==0) && <>
-      <div className="card alt">
-        {holdings.length>0 && <div className="chips">
-          {[["all","All-Time"],["today","Today"]].map(([k,l])=>
-            <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
-        </div>}
-        <div className="lbl">Total Value (CAD)</div>
-        <div className="big" style={{marginTop:6}}>{fmt(Math.round((res?.total_value||0)+cash))}</div>
-        {res && holdings.length>0 && (()=>{
-          const p = filter==="today"?res.total_day_pl:res.total_pl;
-          const pp = filter==="today"?res.total_day_pl_pct:res.total_pl_pct;
-          return <div className="chg" style={{color:p>=0?"var(--green)":"var(--red)"}}>
-            {p>=0?"▲":"▼"} {fmt(Math.abs(p))} ({Math.abs(pp)}%) {filter==="today"?"today":"overall"}</div>;
-        })()}
-        <div className="rule"/>
-        {res && <Row l="Holdings value (CAD)" v={fmt(res.total_value)}/>}
-        <Row l="Cash available" v={fmt(cash)}/>
-        {res && <Row l="Cost basis (CAD)" v={fmt(res.total_cost)}/>}
-        {res?.usd_cad_rate && res.holdings.some(h=>h.currency==="USD") &&
-          <p style={{fontSize:10.5,color:"var(--faint)",marginTop:6}}>USD holdings converted at 1 USD = {res.usd_cad_rate} CAD</p>}
-        {res && <p className="note">{res.summary}</p>}
+      <div className="hero emerald">
+        <div className="hero-body">
+          <div className="hero-main">
+            <div className="k">Total Portfolio Value (CAD)</div>
+            <div className="v">{fmt(Math.round((res?.total_value||0)+cash))}</div>
+            {res && holdings.length>0 && (()=>{
+              const p = filter==="today"?res.total_day_pl:res.total_pl;
+              const pp = filter==="today"?res.total_day_pl_pct:res.total_pl_pct;
+              return <div className="chip-pill">{p>=0?"▲":"▼"} {fmt(Math.abs(p))} ({Math.abs(pp)}%) {filter==="today"?"today":"overall"}</div>;
+            })()}
+          </div>
+          {res && <div className="hero-side"><div className="k">Holdings Value</div><div className="v">{fmt(res.total_value)}</div></div>}
+          {res && <div className="hero-side"><div className="k">Cost Basis</div><div className="v">{fmt(res.total_cost)}</div></div>}
+          <div className="hero-side"><div className="k">Cash Available</div><div className="v">{fmt(cash)}</div></div>
+        </div>
       </div>
+
+      {holdings.length>0 && <div className="chips">
+        {[["all","All-Time"],["today","Today"]].map(([k,l])=>
+          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+      </div>}
+      {res?.usd_cad_rate && res.holdings.some(h=>h.currency==="USD") &&
+        <p className="mut" style={{marginBottom:14}}>USD holdings converted at 1 USD = {res.usd_cad_rate} CAD</p>}
+      {res && <p className="mut" style={{marginBottom:16}}>{res.summary}</p>}
 
       {res?.concentration?.warnings?.length>0 && <div className="card">
         <h2>Concentration Risk</h2>
@@ -1176,7 +1344,7 @@ function Portfolio({state, dispatch}) {
             c={res.concentration.largest_position_pct>30?"var(--amber)":null}/>}
         {Object.entries(res.concentration.sector_concentration||{}).slice(0,4).map(([s,p])=>
           <Row key={s} l={s} v={`${p}%`} c={p>40?"var(--amber)":null}/>)}
-        <div style={{background:"rgba(217,164,65,.08)",borderRadius:8,padding:11,marginTop:12}}>
+        <div style={{background:"var(--amberBg)",borderRadius:8,padding:11,marginTop:12}}>
           {res.concentration.warnings.map((w,i)=><p key={i} style={{fontSize:11.5,lineHeight:1.55,marginBottom:5}}>• {w}</p>)}
         </div>
         <Exp text={res.concentration.note}/>
@@ -1196,13 +1364,14 @@ function Portfolio({state, dispatch}) {
         const v = filter==="today"?h.day_pl:h.unrealized_pl;
         const vp = filter==="today"?h.day_pl_pct:h.unrealized_pl_pct;
         const c = v==null?"var(--muted)":v>=0?"var(--green)":"var(--red)";
-        const sc = SIG[h.signal]||"var(--muted)";
         const hKey = `${h.ticker}__${h.account||""}`;
         return <div className="card" key={hKey}>
           <div style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
                onClick={()=>setOpen({...open,[hKey]:!open[hKey]})}>
+            <Avatar t={h.ticker}/>
             <div style={{flex:1}}><b className="num" style={{fontSize:15}}>{h.ticker}</b>
               <div className="mut" style={{fontSize:11.5}}>{h.current_price!=null?`${h.current_price} ${h.currency}`:h.error||"—"}{h.account?` · ${h.account}`:""}</div></div>
+            {!h.error && <SigBadge sig={h.signal}/>}
             {v!=null && <div style={{textAlign:"right"}}>
               <div className="num" style={{fontWeight:700,color:c}}>{v>=0?"+":""}{fmt(v)}</div>
               <div className="num" style={{fontSize:11,color:c}}>{vp>=0?"+":""}{vp}%</div></div>}
@@ -1211,9 +1380,8 @@ function Portfolio({state, dispatch}) {
           {open[hKey] && <div style={{marginTop:10}}>
             <div className="rule"/>
             {h.error ? <p className="mut">{h.error}</p> : <>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{marginBottom:8}}>
                 <span className="mut" style={{fontSize:11.5}}>{h.shares} shares @ {h.cost_basis} {h.currency}</span>
-                <span className="mini" style={{color:sc,borderColor:sc+"66",background:sc+"1F"}}>{h.signal}</span>
               </div>
               <Row l="Market value" v={fmt(h.market_value)}/>
               <Row l="All-time P/L" v={`${h.unrealized_pl>=0?"+":""}${fmt(h.unrealized_pl)} (${h.unrealized_pl_pct}%)`}
@@ -1290,14 +1458,14 @@ function Brief({state, dispatch}) {
   const list = (rows,title,extra) => rows?.length>0 && <div className="card">
     <h2>{title}{extra}</h2>
     {rows.map((h,i)=><div className="srow" key={`${h.ticker}-${i}`} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+      <Avatar t={h.ticker}/>
       <div style={{flex:1}}>
         <div style={{display:"flex",alignItems:"center",gap:9}}>
           <b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
-          <span className="mini" style={{color:SIG[h.signal],borderColor:SIG[h.signal]+"66",background:SIG[h.signal]+"1F"}}>{h.signal}</span>
-          <span style={{fontSize:10,color:"var(--faint)",fontWeight:600}}>{h.conviction}</span>
         </div>
-        <div className="meta">RSI {h.rsi ?? "—"} · Vol {h.volume_ratio!=null?h.volume_ratio+"×":"—"}</div>
+        <div className="meta">RSI {h.rsi ?? "—"} · Vol {h.volume_ratio!=null?h.volume_ratio+"×":"—"} · Conv. {h.conviction}</div>
       </div>
+      <SigBadge sig={h.signal}/>
       <div style={{textAlign:"right"}}>
         <div className="num" style={{fontWeight:700}}>{h.price ?? "—"}</div>
         {h.change_pct!=null && <div className="num" style={{fontSize:11.5,fontWeight:700,
@@ -1307,23 +1475,30 @@ function Brief({state, dispatch}) {
   </div>;
 
   const signalRow = h => <div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
+    <Avatar t={h.ticker}/>
     <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/>
-      <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · {h.conviction}</div></div>
+      <div className="meta">RSI {h.rsi} · Vol {h.volume_ratio}× · Conv. {h.conviction}</div></div>
     <div style={{textAlign:"right"}}><div className="num" style={{fontWeight:700}}>{h.price}</div>
       <div className="num" style={{fontSize:11.5,color:h.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(h.change_pct)}</div></div>
   </div>;
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
-      <div style={{flex:1}}><h1>Morning Brief</h1><div className="tag">Portfolio · watchlist · opportunities</div></div>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+      <div style={{flex:1}}><h1>Morning Brief</h1>
+        <div className="tag" style={{marginTop:3}}>Portfolio · watchlist · opportunities</div></div>
       <button className="btn sm ghost" onClick={()=>load(false)}>Refresh</button>
     </div>
     {busy && <Spin t="Scanning markets…"/>}
     {err && <div className="err"><b>Couldn't load brief</b>{err}</div>}
     {d && !busy && <>
-      <div className="card alt">
-        <p style={{fontSize:16,fontWeight:700,lineHeight:1.5}}>{d.headline}</p>
-        <p style={{fontSize:10.5,color:"var(--faint)",marginTop:7}}>{new Date(d.generated_at).toLocaleString()}</p>
+      <div className="hero emerald">
+        <div className="hero-body">
+          <div className="hero-main">
+            <div className="k">Today's Signal</div>
+            <div className="v" style={{fontSize:28,lineHeight:1.25}}>{d.headline}</div>
+            <div className="chip-pill" style={{marginTop:14}}>{new Date(d.generated_at).toLocaleString()}</div>
+          </div>
+        </div>
       </div>
       {d.portfolio?.holdings?.length>0 && list(d.portfolio.holdings.map(h=>({
         ticker:h.ticker,price:h.current_price,change_pct:h.unrealized_pl_pct,rsi:h.rsi,
@@ -1371,11 +1546,13 @@ function Brief({state, dispatch}) {
         <h2>Canadian Stocks Under $20</h2>
         {d.under20_buys?.length>0 && <><div className="lbl" style={{marginBottom:4}}>Worth a look</div>
           {d.under20_buys.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <Avatar t={h.ticker}/>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · Conv. {h.conviction}</div></div>
             <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
         {d.under20_avoid?.length>0 && <><div className="lbl" style={{margin:"12px 0 4px"}}>Avoid for now</div>
           {d.under20_avoid.map(h=><div className="srow" key={h.ticker} onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>
-            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · {h.conviction}</div></div>
+            <Avatar t={h.ticker}/>
+            <div style={{flex:1}}><b className="num">{h.ticker}</b> <CTag t={h.ticker}/><div className="meta">RSI {h.rsi} · Conv. {h.conviction}</div></div>
             <div className="num" style={{fontWeight:700}}>{h.price}</div></div>)}</>}
         <p className="note">A fixed list of TSX/TSX-V names commonly under CAD $20 — not the whole exchange.
           "Avoid" means negative momentum now, not a judgment on the business.</p>
@@ -1520,7 +1697,7 @@ function Journal({state, dispatch}) {
   else verdict = "Following the app and overriding it have produced roughly similar results so far.";
 
   return <>
-    <div style={{margin:"22px 0 16px"}}><h1>Journal</h1><div className="tag">What you decided · how it turned out</div></div>
+    <div style={{margin:"28px 0 20px"}}><h1>Journal</h1><div className="tag">What you decided · how it turned out</div></div>
     {!entries.length ? <div className="center"><h3>No entries yet</h3>
       <p>When you analyze a stock, use "Log what you decided" to record what you did and why.
         Over time this shows whether your instincts beat the app's signals — the one thing almost
@@ -1618,8 +1795,9 @@ function Activity({state, dispatch}) {
   const closedTrades = buildActivityFeed(filtered).filter(a=>a.closedTrade);
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"22px 0 16px"}}>
-      <div style={{flex:1}}><h1>Activity</h1><div className="tag">Closed trades · buy vs sell</div></div>
+    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+      <div style={{flex:1}}><h1>Activity</h1>
+        <div className="tag" style={{marginTop:3}}>Closed trades · buy vs sell</div></div>
       <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
       <button className="btn sm ghost" onClick={()=>fileRef.current.click()}>Import from Wealthsimple (CSV)</button>
     </div>
@@ -1632,38 +1810,38 @@ function Activity({state, dispatch}) {
       <h3>No activity imported yet</h3>
       <p>Import your Wealthsimple activity export (CSV) to see closed trades — buy price, sell price, and profit — here.</p>
     </div> : <>
-      {accounts.length>1 && <div className="chips">
-        {[["all","All"],...accounts.map(a=>[a,a])].map(([k,l])=>
-          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
-      </div>}
-
-      <div className="card alt">
-        <div className="lbl">Realized Trading P/L</div>
-        <div className="big" style={{color:pl.total>=0?"var(--green)":"var(--red)",marginTop:6}}>
-          {pl.total>=0?"+":""}{fmt(Math.round(pl.total*100)/100)}
+      <div className="hero violet">
+        <div className="hero-body">
+          <div className="hero-main">
+            <div className="k">Total Realized Trading P/L</div>
+            <div className="v">{pl.total>=0?"+":""}{fmt(Math.round(pl.total*100)/100)}</div>
+            <div className="chip-pill">Matches buys against sells per ticker, running average cost</div>
+          </div>
         </div>
-        <p className="mut" style={{fontSize:12,marginTop:8}}>
-          Matches buys against sells per ticker (and account), using running average cost.
-        </p>
-        {pl.incomplete && <p className="mut" style={{fontSize:12,color:"var(--amber)",marginTop:4}}>
+        {pl.incomplete && <p style={{position:"relative",fontSize:12,opacity:.85,marginTop:14}}>
           Some sales are for more shares than this import ever recorded buying — likely bought
           before your export's date range. This may overstate the total.
         </p>}
-        {pl.byTicker.length>0 && <>
-          <button className="link" style={{marginTop:10}} onClick={()=>setShowByTicker(!showByTicker)}>
-            {showByTicker?"Hide":"Show"} breakdown by ticker
+        {pl.byTicker.length>0 && <div style={{position:"relative",marginTop:14}}>
+          <button className="link" style={{color:"#fff"}} onClick={()=>setShowByTicker(!showByTicker)}>
+            {showByTicker?"Hide":"Show"} breakdown by ticker →
           </button>
-          {showByTicker && <div style={{marginTop:8}}>
+          {showByTicker && <div style={{marginTop:10,background:"rgba(255,255,255,.12)",borderRadius:12,padding:"4px 14px"}}>
             {pl.byTicker.map((t,i)=>
-              <div key={`${t.ticker}-${t.account}-${i}`} className="row">
-                <span>{t.ticker}{t.account?` · ${t.account}`:""}</span>
-                <span style={{color:t.realized>=0?"var(--green)":"var(--red)"}}>
+              <div key={`${t.ticker}-${t.account}-${i}`} className="row" style={{borderBottom:i<pl.byTicker.length-1?"1px solid rgba(255,255,255,.15)":"none"}}>
+                <span style={{color:"rgba(255,255,255,.85)"}}>{t.ticker}{t.account?` · ${t.account}`:""}</span>
+                <span style={{color:t.realized>=0?"#6EE7B7":"#FDA4AF"}}>
                   {t.realized>=0?"+":""}{fmt(Math.round(t.realized*100)/100)}
                 </span>
               </div>)}
           </div>}
-        </>}
+        </div>}
       </div>
+
+      {accounts.length>1 && <div className="chips">
+        {[["all","All"],...accounts.map(a=>[a,a])].map(([k,l])=>
+          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
+      </div>}
 
       {closedTrades.length===0 ? <div className="center">
         <h3>No closed trades yet</h3>
@@ -1674,11 +1852,12 @@ function Activity({state, dispatch}) {
           const knownCost = a.profit != null;
           const c = !knownCost ? "var(--amber)" : a.profit>=0 ? "var(--green)" : "var(--red)";
           return <div className="srow" key={k}>
+            <Avatar t={a.ticker}/>
             <div style={{flex:1}}>
               <div style={{display:"flex",alignItems:"center",gap:9}}>
                 <b className="num">{a.ticker}</b>
-                {a.account && <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",background:"var(--border)"}}>{a.account}</span>}
-                <span className="mini" style={{color:"var(--accent)",borderColor:"transparent",background:"rgba(206,160,78,.12)"}}>{a.shares} sh</span>
+                {a.account && <span className="mini" style={{color:"var(--accent)",background:"var(--accentBg)"}}>{a.account}</span>}
+                <span className="mini" style={{color:"var(--muted)",background:"var(--holdBg)"}}>{a.shares} sh</span>
               </div>
               <div className="meta">
                 Bought {a.avgBuy!=null ? fmt(Math.round(a.avgBuy*100)/100) : "—"} → Sold {a.avgSell!=null ? fmt(Math.round(a.avgSell*100)/100) : "—"}
@@ -1707,11 +1886,27 @@ function Activity({state, dispatch}) {
 }
 
 /* ===== Screener ===== */
+function ScreenerCard({c, dispatch}) {
+  return <div className="card" style={{borderTop:`4px solid ${c.signal==="BUY"?"var(--green)":"var(--red)"}`,cursor:"pointer",marginBottom:0}}
+    onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:9}}><Avatar t={c.ticker}/><b className="num" style={{fontSize:14}}>{c.ticker}</b></div>
+      <SigBadge sig={c.signal}/>
+    </div>
+    <div style={{fontFamily:"var(--font-display)",fontWeight:800,fontSize:19}}>{c.price ?? "—"}</div>
+    {c.change_pct!=null && <div className="num" style={{fontSize:12,fontWeight:700,marginBottom:10,
+      color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)} today</div>}
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5}}>
+      <div><div className="lbl" style={{marginBottom:2}}>RSI</div><b className="num">{c.rsi ?? "—"}</b></div>
+      <div style={{textAlign:"right"}}><div className="lbl" style={{marginBottom:2}}>Conviction</div><b style={{color:"var(--accent)"}}>{c.conviction}</b></div>
+    </div>
+  </div>;
+}
+
 function Screener({dispatch}) {
   const [source,setSource] = useState("universe"); // "universe" | "highvolume"
   const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
   const [hv,setHv] = useState(null), [hvBusy,setHvBusy] = useState(false), [hvErr,setHvErr] = useState(null);
-  const [filter,setFilter] = useState("all");
 
   useEffect(()=>{
     let dead = false;
@@ -1731,18 +1926,19 @@ function Screener({dispatch}) {
     return ()=>{ dead = true; };
   },[source]);
 
-  const universeRows = d ? [
-    ...(d.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"})),
-    ...(d.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"})),
-  ] : [];
-  const rows = source==="highvolume" ? (hv?.stocks||[]) : universeRows;
-  const filtered = filter==="all" ? rows : rows.filter(r=>r.signal===filter.toUpperCase());
+  const buys = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal==="BUY") : (d?.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"}));
+  const sells = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal==="SELL") : (d?.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"}));
+  // The fixed-universe source only ever returns buy/sell candidates, but the
+  // high-volume source is every one of today's most-active tickers — some
+  // will be HOLD. Keep those visible rather than silently dropping them.
+  const watching = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal!=="BUY" && c.signal!=="SELL") : [];
   const activeBusy = source==="highvolume" ? hvBusy : busy;
   const activeErr = source==="highvolume" ? hvErr : err;
   const note = source==="highvolume" ? hv?.universe_note : d?.universe_note;
 
   return <>
-    <div style={{margin:"22px 0 16px"}}><h1>Screener</h1><div className="tag">Scanned candidates · buy & sell signals</div></div>
+    <div style={{margin:"28px 0 20px"}}><h1>Screener</h1>
+      <div className="tag" style={{marginTop:3}}>Scanned candidates · buy & sell signals</div></div>
 
     <div className="chips" style={{marginBottom:10}}>
       {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"]].map(([k,l])=>
@@ -1752,36 +1948,49 @@ function Screener({dispatch}) {
     {activeBusy && <Spin t={source==="highvolume" ? "Fetching today's most active tickers…" : "Scanning universe…"}/>}
     {activeErr && <div className="err"><b>Couldn't load screener</b>{activeErr}</div>}
     {!activeBusy && !activeErr && (source==="highvolume" ? hv : d) && <>
-      {note && <p className="note" style={{marginTop:0}}>{note}</p>}
-      <div className="chips" style={{marginTop:14}}>
-        {[["all","All"],["buy","Buy"],["sell","Sell"]].map(([k,l])=>
-          <div key={k} className={"chip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{l}</div>)}
-      </div>
-      {filtered.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches this filter right now.</p></div> :
-        <div className="card">
-          {filtered.map(c=>{
-            const sc = SIG[c.signal] || "var(--amber)";
-            return <div className="srow" key={c.ticker} onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
-              <div style={{display:"flex",alignItems:"center",gap:10,flex:1}}>
-                <div className="dot" style={{background:sc,marginTop:0}}/>
-                <div>
-                  <b className="num">{c.ticker}</b>
-                  <div className="meta">RSI {c.rsi ?? "—"} · Vol {c.volume_ratio!=null?c.volume_ratio+"×":"—"}</div>
-                </div>
-              </div>
-              <div style={{textAlign:"right"}}>
-                <div className="num">{c.price ?? "—"}</div>
-                {c.change_pct!=null && <div className="num" style={{fontSize:11,color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)}</div>}
-              </div>
-            </div>;
-          })}
-        </div>}
+      {note && <p className="note" style={{marginTop:0,marginBottom:18}}>{note}</p>}
+
+      {buys.length===0 && sells.length===0 && watching.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches right now.</p></div> : <>
+        {buys.length>0 && <>
+          <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:12}}>
+            <h2 style={{marginBottom:0,fontSize:17}}>Buy Candidates</h2>
+            <span className="mini" style={{background:"var(--greenBg)",color:"var(--greenText)"}}>{buys.length} matches</span>
+          </div>
+          <div className="grid" style={{marginBottom:8}}>
+            {buys.map(c=><ScreenerCard key={c.ticker} c={c} dispatch={dispatch}/>)}
+          </div>
+        </>}
+        {sells.length>0 && <>
+          <div style={{display:"flex",alignItems:"center",gap:9,margin:"22px 0 12px"}}>
+            <h2 style={{marginBottom:0,fontSize:17}}>Sell Candidates</h2>
+            <span className="mini" style={{background:"var(--redBg)",color:"var(--redText)"}}>{sells.length} matches</span>
+          </div>
+          <div className="grid">
+            {sells.map(c=><ScreenerCard key={c.ticker} c={c} dispatch={dispatch}/>)}
+          </div>
+        </>}
+        {watching.length>0 && <>
+          <div style={{display:"flex",alignItems:"center",gap:9,margin:"22px 0 12px"}}>
+            <h2 style={{marginBottom:0,fontSize:17}}>Also Scanned</h2>
+            <span className="mini" style={{background:"var(--holdBg)",color:"var(--holdText)"}}>{watching.length} watching</span>
+          </div>
+          <div className="card">
+            {watching.map(c=><div className="srow" key={c.ticker} onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
+              <Avatar t={c.ticker}/>
+              <div style={{flex:1}}><b className="num">{c.ticker}</b>
+                <div className="meta">RSI {c.rsi ?? "—"} · Conv. {c.conviction}</div></div>
+              <SigBadge sig={c.signal}/>
+              <div className="num" style={{fontWeight:700,marginLeft:12}}>{c.price ?? "—"}</div>
+            </div>)}
+          </div>
+        </>}
+      </>}
       {source==="universe" ? (
-        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+        <p className="center" style={{fontSize:11,padding:"18px 0 10px"}}>
           Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
         </p>
       ) : (
-        <p className="center" style={{fontSize:11,padding:"10px 0"}}>
+        <p className="center" style={{fontSize:11,padding:"18px 0 10px"}}>
           {hv.stocks.length} tickers{hv.generated_at?` · ${new Date(hv.generated_at).toLocaleString()}`:""}{hv.cached?" · cached":""}
         </p>
       )}
@@ -1804,14 +2013,14 @@ const LEARN_SECTIONS = [
 function Learn() {
   const [open,setOpen] = useState({0:true});
   return <>
-    <div style={{margin:"22px 0 16px"}}><h1>Learn</h1><div className="tag">Stocks 101 · plain-English basics</div></div>
+    <div style={{margin:"28px 0 20px"}}><h1>Learn</h1><div className="tag">Stocks 101 · plain-English basics</div></div>
     {LEARN_SECTIONS.map((s,i)=>{
       const o = !!open[i];
-      return <div key={i} className="card" style={{borderColor:o?"rgba(79,168,130,.27)":"var(--border)",cursor:"pointer"}}
+      return <div key={i} className="card" style={{borderColor:o?"var(--accent)":"var(--border)",cursor:"pointer"}}
         onClick={()=>setOpen({...open,[i]:!o})}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <b style={{fontSize:14}}>{s.t}</b>
-          <span style={{fontSize:14,color:o?"var(--green)":"var(--faint)"}}>{o?"▲":"▼"}</span>
+          <span style={{fontSize:14,color:o?"var(--accent)":"var(--faint)"}}>{o?"▲":"▼"}</span>
         </div>
         {o && <p className="mut" style={{marginTop:8,lineHeight:1.55}}>{s.b}</p>}
       </div>;
@@ -1820,7 +2029,8 @@ function Learn() {
 }
 
 /* ===== Settings ===== */
-function Settings() {
+function Settings({state}) {
+  const {theme, setTheme} = state;
   const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
   const [currency,setCurrency] = useState(()=>store.get("ma_currency","CAD"));
 
@@ -1828,7 +2038,17 @@ function Settings() {
   const setCur = c => { setCurrency(c); store.set("ma_currency", c); };
 
   return <>
-    <div style={{margin:"22px 0 16px"}}><h1>Settings</h1><div className="tag">Defaults for this device</div></div>
+    <div style={{margin:"28px 0 20px"}}><h1>Settings</h1>
+      <div className="tag" style={{marginTop:3}}>Defaults for this device</div></div>
+
+    <div className="card">
+      <h2>Appearance</h2>
+      <p className="mut" style={{marginBottom:12}}>Light and dark both use the same color system — pick one, or match your device automatically.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {[["system","Match device"],["light","☀️ Light"],["dark","🌙 Dark"]].map(([k,l])=>
+          <div key={k} className={"chip"+(theme===k?" on":"")} onClick={()=>setTheme(k)}>{l}</div>)}
+      </div>
+    </div>
     <div className="card">
       <h2>Default risk per trade</h2>
       <p className="mut" style={{marginBottom:12}}>Sets the starting risk % in the position-sizing calculator on Analyze.</p>
@@ -1901,6 +2121,27 @@ function App() {
   const [activity,setActivity] = useState(()=>store.get("ma_activity",[]));
   const [portfolioValue,setPV] = useState(0);
   const [logOpen,setLogOpen] = useState(false);
+  // "system" (default) tracks the OS/browser preference via the CSS media
+  // query; "light"/"dark" pins an explicit choice. See the pre-paint script
+  // in <head> that applies this same value before first render.
+  const [theme,setTheme] = useState(() => {
+    try { return localStorage.getItem("ma_theme") || "system"; } catch { return "system"; }
+  });
+  useEffect(() => {
+    const lightMeta = document.getElementById("theme-color-light");
+    const darkMeta = document.getElementById("theme-color-dark");
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+      const color = theme === "dark" ? "#0F1216" : "#F7F7FB";
+      lightMeta.setAttribute("content", color);
+      darkMeta.setAttribute("content", color);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+      lightMeta.setAttribute("content", "#F7F7FB");
+      darkMeta.setAttribute("content", "#0F1216");
+    }
+    try { theme === "system" ? localStorage.removeItem("ma_theme") : localStorage.setItem("ma_theme", theme); } catch {}
+  }, [theme]);
 
   const setScanTickersPersist = useCallback(list => {
     setScanTickers(list); store.set("ma_scan_tickers", list);
@@ -1949,25 +2190,35 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading};
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,theme,setTheme};
 
   return <>
-    <header><div className="hdr">
-      <div className="logo"><Logo/></div>
-      <div><h1>Market Analyzer</h1><div className="tag">Measured signals · not predictions</div></div>
-      <nav>{TABS.map(([k,l])=>
-        <button key={k} className={tab===k?"on":""}
-          onClick={()=>{if (k!==tab) setReturnTab(null); setTab(k);}}>{l}</button>)}</nav>
-    </div></header>
-    <div className="wrap">
-      {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
-      {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
-      {tab==="activity" && <Activity state={state} dispatch={dispatch}/>}
-      {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
-      {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
-      {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
-      {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
-      {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="logo"><Logo light/></div>
+          <h1>Market<span>Analyzer</span></h1>
+        </div>
+        <nav>{TABS.map(([k,l,icon])=>
+          <button key={k} className={tab===k?"on":""}
+            onClick={()=>{if (k!==tab) setReturnTab(null); setTab(k);}}>
+            <NavIcon name={icon}/>{l}
+          </button>)}</nav>
+        <div className="promo">
+          <b>✨ AI Signals Active</b>
+          <p>Real-time conviction scoring across your holdings.</p>
+        </div>
+      </aside>
+      <div className="wrap" style={{flex:1,minWidth:0}}>
+        {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
+        {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
+        {tab==="activity" && <Activity state={state} dispatch={dispatch}/>}
+        {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
+        {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
+        {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
+        {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
+        {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
+      </div>
     </div>
     {logOpen && data && <LogModal data={data} onClose={()=>setLogOpen(false)}
       onSave={e=>{ const n=[e,...journal]; setJournal(n); store.set("ma_journal",n); setLogOpen(false);
