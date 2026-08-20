@@ -6,3 +6,8 @@ transformers==4.44.2
 torch==2.4.1
 pydantic==2.9.2
 anthropic==0.122.0
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+passlib==1.7.4
+bcrypt==4.0.1
+pyjwt==2.9.0
