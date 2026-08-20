@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#F3F2F2">
+<meta id="theme-color-light" name="theme-color" content="#F3F2F2" media="(prefers-color-scheme: light)">
+<meta id="theme-color-dark" name="theme-color" content="#17161A" media="(prefers-color-scheme: dark)">
 <title>Market Analyzer</title>
 <link rel="icon" href="/static/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -12,13 +13,30 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+// Applied before first paint so there's no flash of the wrong theme.
+// "system" (the default) tracks the OS/browser preference live; an explicit
+// choice pins data-theme and wins over the media query (see CSS below).
+(function(){
+  try{
+    var saved = localStorage.getItem("ma_theme");
+    if (saved === "light" || saved === "dark") {
+      document.documentElement.setAttribute("data-theme", saved);
+      var color = saved === "dark" ? "#17161A" : "#F3F2F2";
+      document.getElementById("theme-color-light").setAttribute("content", color);
+      document.getElementById("theme-color-dark").setAttribute("content", color);
+    }
+  }catch(e){}
+})();
+</script>
 <style>
 /* ---------------------------------------------------------------------------
    Modernist theme: flat, architectural, near-mono red on a warm paper
-   ground. Zero corner radius everywhere, strong dividers do the organizing
-   instead of shadows or color. One accent (red) — no second "positive"
-   color: gains/BUY read in plain ink (with an up/down trend icon where
-   space allows), losses/SELL/warnings use the accent ramp. No dark mode.
+   ground (dark mode: the same system inverted onto a warm near-black
+   ground — see the [data-theme] blocks below). Zero corner radius
+   everywhere, strong dividers do the organizing instead of shadows or
+   color. One accent (red) — no second "positive" color: gains/BUY read in
+   plain ink, losses/SELL/warnings use the accent ramp.
 --------------------------------------------------------------------------- */
 :root{
   --bg:#F3F2F2; --card:#EAE9E9; --cardAlt:#EAE9E9;
@@ -36,8 +54,36 @@
   --font-display:'Archivo',system-ui,sans-serif; --font-sans:'Archivo',system-ui,sans-serif;
   --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
 }
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#17161A; --card:#211F24; --cardAlt:#211F24;
+    --border:color-mix(in srgb, #F3F2F2 22%, transparent); --borderLit:color-mix(in srgb, #F3F2F2 14%, transparent);
+    --text:#F3F2F2; --muted:color-mix(in srgb, #F3F2F2 58%, transparent); --faint:color-mix(in srgb, #F3F2F2 40%, transparent);
+    --accent:#FF563C; --accentDim:#FF9783; --accentBg:color-mix(in srgb, #FF563C 18%, transparent);
+    --green:#F3F2F2; --greenBg:#26242A; --greenText:#F3F2F2;
+    --red:#FF9783; --redBg:color-mix(in srgb, #FF563C 16%, transparent); --redText:#FFC4B8;
+    --amber:#FF563C; --amberBg:color-mix(in srgb, #FF563C 18%, transparent); --amberText:#FF9783;
+    --holdBg:#26242A; --holdText:#B8B4B4;
+    --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+    --shadow-card:0 4px 14px rgba(0,0,0,.5);
+    --shadow-pop:0 4px 14px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#17161A; --card:#211F24; --cardAlt:#211F24;
+  --border:color-mix(in srgb, #F3F2F2 22%, transparent); --borderLit:color-mix(in srgb, #F3F2F2 14%, transparent);
+  --text:#F3F2F2; --muted:color-mix(in srgb, #F3F2F2 58%, transparent); --faint:color-mix(in srgb, #F3F2F2 40%, transparent);
+  --accent:#FF563C; --accentDim:#FF9783; --accentBg:color-mix(in srgb, #FF563C 18%, transparent);
+  --green:#F3F2F2; --greenBg:#26242A; --greenText:#F3F2F2;
+  --red:#FF9783; --redBg:color-mix(in srgb, #FF563C 16%, transparent); --redText:#FFC4B8;
+  --amber:#FF563C; --amberBg:color-mix(in srgb, #FF563C 18%, transparent); --amberText:#FF9783;
+  --holdBg:#26242A; --holdText:#B8B4B4;
+  --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+  --shadow-card:0 4px 14px rgba(0,0,0,.5);
+  --shadow-pop:0 4px 14px rgba(0,0,0,.5);
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.55 var(--font-sans);-webkit-font-smoothing:antialiased}
+body{background:var(--bg);color:var(--text);font:15px/1.55 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
 :focus{outline:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 ::selection{background:color-mix(in srgb, var(--accent) 30%, transparent)}
@@ -2072,6 +2118,7 @@ function Learn() {
 
 /* ===== Settings ===== */
 function Settings({state}) {
+  const {theme, setTheme} = state;
   const [risk,setRisk] = useState(()=>store.get("ma_risk_pct",1));
   const [currency,setCurrency] = useState(()=>store.get("ma_currency","CAD"));
 
@@ -2082,6 +2129,14 @@ function Settings({state}) {
     <div style={{margin:"28px 0 20px"}}><h1>Settings</h1>
       <div className="tag" style={{marginTop:3}}>Defaults for this device</div></div>
 
+    <div className="card">
+      <h2>Appearance</h2>
+      <p className="mut" style={{marginBottom:12}}>Light and dark both use the same design system — pick one, or match your device automatically.</p>
+      <div className="chips" style={{marginBottom:0}}>
+        {[["system","Match device"],["light","Light"],["dark","Dark"]].map(([k,l])=>
+          <div key={k} className={"chip"+(theme===k?" on":"")} onClick={()=>setTheme(k)}>{l}</div>)}
+      </div>
+    </div>
     <div className="card">
       <h2>Default risk per trade</h2>
       <p className="mut" style={{marginBottom:12}}>Sets the starting risk % in the position-sizing calculator on Analyze.</p>
@@ -2154,6 +2209,27 @@ function App() {
   const [activity,setActivity] = useState(()=>store.get("ma_activity",[]));
   const [portfolioValue,setPV] = useState(0);
   const [logOpen,setLogOpen] = useState(false);
+  // "system" (default) tracks the OS/browser preference via the CSS media
+  // query; "light"/"dark" pins an explicit choice. See the pre-paint script
+  // in <head> that applies this same value before first render.
+  const [theme,setTheme] = useState(() => {
+    try { return localStorage.getItem("ma_theme") || "system"; } catch { return "system"; }
+  });
+  useEffect(() => {
+    const lightMeta = document.getElementById("theme-color-light");
+    const darkMeta = document.getElementById("theme-color-dark");
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+      const color = theme === "dark" ? "#17161A" : "#F3F2F2";
+      lightMeta.setAttribute("content", color);
+      darkMeta.setAttribute("content", color);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+      lightMeta.setAttribute("content", "#F3F2F2");
+      darkMeta.setAttribute("content", "#17161A");
+    }
+    try { theme === "system" ? localStorage.removeItem("ma_theme") : localStorage.setItem("ma_theme", theme); } catch {}
+  }, [theme]);
 
   const setScanTickersPersist = useCallback(list => {
     setScanTickers(list); store.set("ma_scan_tickers", list);
@@ -2267,7 +2343,7 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision};
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme};
 
   return <>
     <nav className="nav">
