@@ -6,6 +6,7 @@ company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -362,6 +363,33 @@ class AIDecisionResponse(BaseModel):
     take_profit: Optional[float] = None
     risk_reward_ratio: Optional[float] = None
     rationale: Optional[str] = None
+
+
+class DecisionHistoryEntry(BaseModel):
+    """
+    One past AI Decision for this ticker, already resolved against a later
+    price by the client (which is the only side that persists this history —
+    see AIDecisionRequest). Sent back on the next request so the model can
+    see whether its own past calls on this exact ticker actually panned out,
+    instead of reasoning fresh from zero every time.
+    """
+    decided_at: str
+    conviction_score: int
+    price_then: float
+    price_now: float
+    hit_take_profit: bool = False
+    hit_stop_loss: bool = False
+
+
+class AIDecisionRequest(BaseModel):
+    # Present only when the person already holds this ticker — switches the
+    # question from "is this worth a fresh entry" to "is this worth
+    # continuing to hold at this cost basis."
+    shares: Optional[float] = None
+    cost_basis: Optional[float] = None
+    # Past decisions for this ticker the client has already resolved against
+    # a later price. Bounded client-side; capped again here defensively.
+    history: List[DecisionHistoryEntry] = []
 
 
 # --- Screener / portfolio / digest -----------------------------------------
@@ -1727,8 +1755,9 @@ class AIDecisionOutput(BaseModel):
         "Suggested entry price, adjusted from mechanical_price_targets.entry only if "
         "something in the context gives a specific reason to. mechanical_price_targets.entry "
         "is null whenever the signal is HOLD/SELL with no suggested entry — in that case "
-        "you MUST return null here too. Never invent a price level with no baseline to "
-        "anchor to."
+        "you MUST return null here too. Also null whenever existing_position is present "
+        "(the person already holds shares — there's no new-entry question). Never invent a "
+        "price level with no baseline to anchor to."
     ))
     stop_loss: Optional[float] = Field(description=(
         "Suggested stop-loss price, same rule as entry: adjust mechanical_price_targets."
@@ -1765,6 +1794,9 @@ def generate_ai_decision(
     earnings: EarningsInfo,
     price_targets: PriceTargets,
     sentiment: SentimentAnalysis,
+    held_shares: Optional[float] = None,
+    held_cost_basis: Optional[float] = None,
+    history: Optional[List[DecisionHistoryEntry]] = None,
 ) -> Optional[AIDecisionOutput]:
     """
     The one place in the app that actually reasons across everything it
@@ -1776,11 +1808,17 @@ def generate_ai_decision(
     AIDecisionOutput. Called from the separate /decision endpoint below (see
     _DECISION_CACHE), not inline in /api/analyze, so a slow Claude call never
     blocks data that's already computed.
+
+    held_shares/held_cost_basis switch the question from "is this worth a
+    fresh entry" to "is this worth continuing to hold" — see the system
+    prompt. history closes the loop on the model's own past calls for this
+    ticker: whether they'd have hit take-profit or stop-loss by now.
     """
     client = _get_anthropic_client()
     if client is None:
         return None
 
+    is_held = held_shares is not None and held_cost_basis is not None
     payload = {
         "ticker": ticker,
         "company_name": company_name,
@@ -1821,6 +1859,36 @@ def generate_ai_decision(
             ],
         },
     }
+    if is_held:
+        unrealized_pl_pct = round((current_price - held_cost_basis) / held_cost_basis * 100, 2) \
+            if current_price and held_cost_basis else None
+        payload["existing_position"] = {
+            "shares": held_shares,
+            "cost_basis": held_cost_basis,
+            "unrealized_pl_pct": unrealized_pl_pct,
+        }
+    if history:
+        payload["past_ai_decisions_for_this_ticker"] = [h.model_dump() for h in history[:5]]
+
+    held_instructions = (
+        "\n\nThe person already holds this position (see existing_position) — the question "
+        "is whether to keep holding, trim, or exit, not whether to buy fresh. You MUST return "
+        "null for entry: there is no new-entry question here. stop_loss/take_profit, if "
+        "returned, are protective levels from the current price going forward, not an entry "
+        "setup. conviction_score should directly answer 'how justified is continuing to hold "
+        "at this cost basis' — weigh their unrealized P/L as context (e.g. a large unrealized "
+        "loss with a now-bearish signal is a different situation than a small one), not as "
+        "something to be defensive about."
+    ) if is_held else ""
+    history_instructions = (
+        "\n\npast_ai_decisions_for_this_ticker shows your own previous calls on this exact "
+        "ticker, each already resolved against a later price by the caller. If past high-"
+        "conviction scores did NOT hit take-profit before hitting stop-loss (or the price "
+        "moved against the score), calibrate this new score more conservatively rather than "
+        "repeating the same optimism — and say so in the rationale if it materially changed "
+        "your score. Past scores having been right isn't itself a reason for extra confidence "
+        "now; only the current evidence is."
+    ) if history else ""
 
     try:
         response = client.with_options(timeout=25.0).messages.parse(
@@ -1846,6 +1914,7 @@ def generate_ai_decision(
                 "price levels here would be a fabricated trade setup, not an analysis. "
                 "Never issue an instruction ('buy this now') — the numbers themselves are "
                 "the output; rationale is one sentence explaining them, not advice."
+                + held_instructions + history_instructions
             ),
             messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
             output_format=AIDecisionOutput,
@@ -2006,8 +2075,8 @@ def analyze(ticker: str):
     return response
 
 
-@app.get("/api/analyze/{ticker}/decision", response_model=AIDecisionResponse)
-def analyze_decision(ticker: str):
+@app.post("/api/analyze/{ticker}/decision", response_model=AIDecisionResponse)
+def analyze_decision(ticker: str, request: AIDecisionRequest = AIDecisionRequest()):
     """
     The AI Decision, split out from /api/analyze itself. It reuses that
     endpoint's cached technicals/fundamentals/etc. rather than refetching,
@@ -2015,6 +2084,13 @@ def analyze_decision(ticker: str):
     (or, worse, drops) the price/technical/fundamental data that's already
     computed and ready. Call this only after /api/analyze/{ticker} has
     populated the cache for the same ticker.
+
+    POST (not GET) because the request body carries optional context that
+    changes the actual question being asked: shares/cost_basis switch it
+    from "worth a fresh entry" to "worth continuing to hold," and history
+    is the client's own record of how this ticker's past AI Decisions here
+    turned out, fed back so the model can calibrate against its own track
+    record rather than reasoning fresh every time.
     """
     ticker = ticker.strip().upper()
     cached = cache_get(ticker)
@@ -2024,10 +2100,23 @@ def analyze_decision(ticker: str):
             detail="No cached analysis for this ticker yet — call /api/analyze/{ticker} first.",
         )
 
-    # Reuse across repeat views of the same ticker within the analysis cache
-    # window — otherwise reopening the Analyze screen re-triggers a Claude
-    # call every time even though nothing underneath changed.
-    cached_decision = _DECISION_CACHE.get(ticker)
+    # Cached per the exact question asked, not just per ticker — held vs.
+    # fresh-entry framing and a changing history are genuinely different
+    # requests, so the same content hash pattern used elsewhere in this app
+    # (see the earlier AI brief) applies here too. Reuse across repeat views
+    # of the *same* question within the analysis cache window — otherwise
+    # reopening the Analyze screen re-triggers a Claude call every time even
+    # though nothing underneath changed.
+    cache_key_material = {
+        "ticker": ticker,
+        "shares": request.shares,
+        "cost_basis": request.cost_basis,
+        "history": [h.model_dump() for h in request.history[:5]],
+    }
+    cache_key = ticker + ":" + hashlib.sha256(
+        json.dumps(cache_key_material, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+    cached_decision = _DECISION_CACHE.get(cache_key)
     if cached_decision and time.time() - cached_decision[0] < _CACHE_TTL_SECONDS:
         return AIDecisionResponse(**cached_decision[1])
 
@@ -2036,12 +2125,14 @@ def analyze_decision(ticker: str):
         a.ticker, a.company_name, a.current_price, a.price_change_pct, a.currency,
         a.technical_analysis, a.fundamentals, a.quality, a.data_quality, a.regime,
         a.earnings, a.price_targets, a.sentiment_analysis,
+        held_shares=request.shares, held_cost_basis=request.cost_basis,
+        history=request.history,
     )
     if decision is None:
         return AIDecisionResponse()
 
     decision_dict = decision.model_dump()
-    _DECISION_CACHE[ticker] = (time.time(), decision_dict)
+    _DECISION_CACHE[cache_key] = (time.time(), decision_dict)
     if len(_DECISION_CACHE) > 100:
         oldest = min(_DECISION_CACHE.items(), key=lambda kv: kv[1][0])[0]
         _DECISION_CACHE.pop(oldest, None)

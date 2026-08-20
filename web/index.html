@@ -262,6 +262,46 @@ const store = {
   set(k, v) { mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
+// Closes the loop on the AI Decision: every scored call gets recorded here
+// (keyed by ticker, capped per ticker so this never grows unbounded), and
+// once a record is old enough to judge, it's resolved against the current
+// price and sent back on the next call for that ticker so the model can
+// calibrate against its own track record instead of reasoning fresh each
+// time. This is the only place that persists decision history — the
+// backend is stateless across requests by design.
+const AI_DECISIONS_KEY = "ma_ai_decisions";
+const DECISION_RESOLVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000; // ~10 trading days
+function recordDecision(ticker, priceThen, decision) {
+  if (!decision || decision.conviction_score == null || priceThen == null) return;
+  const all = store.get(AI_DECISIONS_KEY, {});
+  const list = all[ticker] || [];
+  list.push({
+    decided_at: new Date().toISOString(),
+    conviction_score: decision.conviction_score,
+    price_then: priceThen,
+    stop_loss: decision.stop_loss,
+    take_profit: decision.take_profit,
+  });
+  all[ticker] = list.slice(-10);
+  store.set(AI_DECISIONS_KEY, all);
+}
+function resolvedHistoryFor(ticker, currentPrice) {
+  if (currentPrice == null) return [];
+  const list = store.get(AI_DECISIONS_KEY, {})[ticker] || [];
+  const cutoff = Date.now() - DECISION_RESOLVE_AFTER_MS;
+  return list
+    .filter(r => new Date(r.decided_at).getTime() <= cutoff)
+    .slice(-5)
+    .map(r => ({
+      decided_at: r.decided_at,
+      conviction_score: r.conviction_score,
+      price_then: r.price_then,
+      price_now: currentPrice,
+      hit_take_profit: r.take_profit != null && currentPrice >= r.take_profit,
+      hit_stop_loss: r.stop_loss != null && currentPrice <= r.stop_loss,
+    }));
+}
+
 const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
 const TABS = [["portfolio","Portfolio","pie"],["analyze","Analyze","search"],["brief","Brief","sun"],
   ["screener","Screener","filter"],["activity","Activity","book"],["journal","Journal","note"],
@@ -980,25 +1020,30 @@ function Analyze({state, dispatch}) {
               <div className="gauge-tag">{decision.conviction_label}</div>
             </div>
             <div style={{flex:1,minWidth:240}}>
-              {decision.entry != null && <div style={{display:"grid",
-                gridTemplateColumns:`repeat(${decision.risk_reward_ratio!=null?4:3},1fr)`,gap:10,marginBottom:14}}>
-                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Entry</div>
-                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
-                </div>
-                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
-                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FDA4AF"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
-                </div>
-                <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
-                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#6EE7B7"}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
-                </div>
-                {decision.risk_reward_ratio != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                  <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
-                  <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FCD34D"}}>{decision.risk_reward_ratio} : 1</div>
-                </div>}
-              </div>}
+              {held && <div className="mini" style={{color:"var(--muted)",background:"var(--holdBg)",marginBottom:10,display:"inline-block"}}>
+                Scored against your position · {held.shares} sh @ {held.cost_basis} {data.currency}</div>}
+              {(decision.entry != null || decision.stop_loss != null || decision.take_profit != null) && (()=>{
+                const cols = [decision.entry!=null, decision.stop_loss!=null, decision.take_profit!=null, decision.risk_reward_ratio!=null]
+                  .filter(Boolean).length;
+                return <div style={{display:"grid",gridTemplateColumns:`repeat(${cols},1fr)`,gap:10,marginBottom:14}}>
+                  {decision.entry != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Entry</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  </div>}
+                  {decision.stop_loss != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FDA4AF"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  </div>}
+                  {decision.take_profit != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#6EE7B7"}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  </div>}
+                  {decision.risk_reward_ratio != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FCD34D"}}>{decision.risk_reward_ratio} : 1</div>
+                  </div>}
+                </div>;
+              })()}
               {decision.rationale && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:14,fontSize:13,lineHeight:1.55}}>
                 {decision.rationale}
               </div>}
@@ -1185,6 +1230,31 @@ function Portfolio({state, dispatch}) {
   const [sell,setSell] = useState(null);
   const fileRef = useRef(null);
   const [importMsg,setImportMsg] = useState(null);
+  const [decisions,setDecisions] = useState({});
+  const [decisionBusy,setDecisionBusy] = useState({});
+
+  // /api/analyze/{ticker}/decision reuses /api/analyze's own cache rather
+  // than refetching — Portfolio's own pricing call (batch_score, above)
+  // doesn't populate that cache, so this fetches the full analysis first
+  // (cheap/no-op if already cached from a recent Analyze-screen visit)
+  // before asking for a decision scored against this exact position.
+  const getDecision = useCallback(async h => {
+    const hKey = `${h.ticker}__${h.account||""}`;
+    if (decisionBusy[hKey]) return;
+    setDecisionBusy(prev=>({...prev,[hKey]:true}));
+    try {
+      const a = await api(`/api/analyze/${encodeURIComponent(h.ticker)}`);
+      const body = {shares:h.shares, cost_basis:h.cost_basis, history: resolvedHistoryFor(h.ticker, a.current_price)};
+      const v = await api(`/api/analyze/${encodeURIComponent(h.ticker)}/decision`, {
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+      });
+      if (v.conviction_score != null) {
+        setDecisions(prev=>({...prev,[hKey]:v}));
+        recordDecision(h.ticker, a.current_price, v);
+      }
+    } catch {}
+    finally { setDecisionBusy(prev=>({...prev,[hKey]:false})); }
+  },[decisionBusy]);
 
   const load = useCallback(async list => {
     const t = list ?? holdings;
@@ -1397,6 +1467,39 @@ function Portfolio({state, dispatch}) {
                 c={h.day_pl>=0?"var(--green)":"var(--red)"}/>}
               <Row l="RSI (14)" v={h.rsi}/>
               <p className="note">{h.context}</p>
+              <div style={{marginTop:10}}>
+                {!decisions[hKey] && !decisionBusy[hKey] && <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  <span className="ai-badge">AI</span>
+                  <span className="mut" style={{fontSize:11.5,flex:1,minWidth:140}}>Is this still worth holding at your cost basis?</span>
+                  <button className="btn ghost" style={{padding:"7px 14px",fontSize:12.5}} onClick={()=>getDecision(h)}>Get AI Decision</button>
+                </div>}
+                {decisionBusy[hKey] && <div style={{display:"flex",alignItems:"center",gap:9}}>
+                  <span className="ai-badge">AI</span><span className="mut">Scoring the setup…</span>
+                </div>}
+                {decisions[hKey] && decisions[hKey].conviction_score != null && (()=>{
+                  const dec = decisions[hKey];
+                  const R = 30, C = 2*Math.PI*R, score = dec.conviction_score;
+                  const strokeColor = score>=65 ? "var(--green)" : score<40 ? "var(--red)" : "var(--amber)";
+                  return <div style={{display:"flex",gap:12,alignItems:"center",background:"var(--accentBg)",borderRadius:12,padding:12}}>
+                    <div className="gauge" style={{width:64,height:64,flexShrink:0}}>
+                      <svg viewBox="0 0 76 76">
+                        <circle cx="38" cy="38" r={R} fill="none" stroke="var(--border)" strokeWidth="7"/>
+                        <circle cx="38" cy="38" r={R} fill="none" stroke={strokeColor} strokeWidth="7" strokeLinecap="round"
+                          strokeDasharray={C} strokeDashoffset={C*(1-score/100)}/>
+                      </svg>
+                      <div className="num"><b style={{fontSize:15}}>{score}</b></div>
+                    </div>
+                    <div style={{flex:1,minWidth:160}}>
+                      <div style={{fontWeight:700,fontSize:12.5,marginBottom:3}}>{dec.conviction_label}</div>
+                      {(dec.stop_loss!=null || dec.take_profit!=null) && <div style={{display:"flex",gap:14,fontSize:11.5,marginBottom:5}}>
+                        {dec.stop_loss!=null && <span>Stop <b className="num" style={{color:"var(--red)"}}>{dec.stop_loss}</b></span>}
+                        {dec.take_profit!=null && <span>Target <b className="num" style={{color:"var(--green)"}}>{dec.take_profit}</b></span>}
+                      </div>}
+                      {dec.rationale && <p className="mut" style={{fontSize:11.5,lineHeight:1.5}}>{dec.rationale}</p>}
+                    </div>
+                  </div>;
+                })()}
+              </div>
             </>}
             <div style={{display:"flex",justifyContent:"space-between",marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)"}}>
               <button className="link" onClick={()=>dispatch({type:"analyze", ticker:h.ticker})}>Full analysis →</button>
@@ -2174,11 +2277,19 @@ function App() {
     setVerdictLoading(true);
     verdictTickerRef.current = s;
     try {
-      const v = await api(`/api/analyze/${encodeURIComponent(s)}/decision`);
+      const held = holdings.find(h=>h.ticker===s);
+      const body = {history: resolvedHistoryFor(s, data.current_price)};
+      if (held) { body.shares = held.shares; body.cost_basis = held.cost_basis; }
+      const v = await api(`/api/analyze/${encodeURIComponent(s)}/decision`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
       setData(prev => (prev && prev.ticker===s) ? {...prev, ai_decision:v} : prev);
+      recordDecision(s, data.current_price, v);
     } catch {}
     finally { if (verdictTickerRef.current===s) setVerdictLoading(false); }
-  },[data, verdictLoading]);
+  },[data, verdictLoading, holdings]);
 
   const dispatch = useCallback(a => {
     switch(a.type){
