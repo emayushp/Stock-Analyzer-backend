@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta id="theme-color-light" name="theme-color" content="#F7F7FB" media="(prefers-color-scheme: light)">
-<meta id="theme-color-dark" name="theme-color" content="#0F1216" media="(prefers-color-scheme: dark)">
+<meta id="theme-color-light" name="theme-color" content="#F3F2F2" media="(prefers-color-scheme: light)">
+<meta id="theme-color-dark" name="theme-color" content="#17161A" media="(prefers-color-scheme: dark)">
 <title>Market Analyzer</title>
 <link rel="icon" href="/static/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -17,14 +17,12 @@
 // Applied before first paint so there's no flash of the wrong theme.
 // "system" (the default) tracks the OS/browser preference live; an explicit
 // choice pins data-theme and wins over the media query (see CSS below).
-// Also pins the theme-color meta tags to match, since those normally follow
-// prefers-color-scheme on their own and won't otherwise reflect an override.
 (function(){
   try{
     var saved = localStorage.getItem("ma_theme");
     if (saved === "light" || saved === "dark") {
       document.documentElement.setAttribute("data-theme", saved);
-      var color = saved === "dark" ? "#0F1216" : "#F7F7FB";
+      var color = saved === "dark" ? "#17161A" : "#F3F2F2";
       document.getElementById("theme-color-light").setAttribute("content", color);
       document.getElementById("theme-color-dark").setAttribute("content", color);
     }
@@ -33,144 +31,137 @@
 </script>
 <style>
 /* ---------------------------------------------------------------------------
-   Bold, colorful consumer-fintech theme. Light by default; dark tracks the
-   OS/browser preference unless the person picks one explicitly in Settings
-   (see the inline script in <head> and [data-theme] overrides below).
-   Green/red stay reserved for money moving; violet ("ai") marks anything
-   Claude-generated, distinct from the app's own mechanical signals.
+   Modernist theme: flat, architectural, near-mono red on a warm paper
+   ground (dark mode: the same system inverted onto a warm near-black
+   ground — see the [data-theme] blocks below). Zero corner radius
+   everywhere, strong dividers do the organizing instead of shadows or
+   color. One accent (red) — no second "positive" color: gains/BUY read in
+   plain ink, losses/SELL/warnings use the accent ramp.
 --------------------------------------------------------------------------- */
 :root{
-  --bg:#F7F7FB; --card:#FFFFFF; --cardAlt:#FFFFFF; --border:#F1F5F9; --borderLit:#E6E9F2;
-  --text:#0F172A; --muted:#8892A6; --faint:#B7BECC;
-  --accent:#7C3AED; --accentDim:#5B21B6; --accentBg:#EDE4FF;
-  --green:#10B981; --greenBg:#D1FAE5; --greenText:#047857;
-  --red:#F43B5D; --redBg:#FFE1E7; --redText:#BE123C;
-  --amber:#D97706; --amberBg:#FEF3C7; --amberText:#B45309;
-  --holdBg:#F1F5F9; --holdText:#64748B;
-  --shadow-soft:0 2px 10px rgba(20,20,43,.07);
-  --shadow-card:0 8px 24px rgba(20,20,43,.09);
-  --shadow-pop:0 10px 30px rgba(124,58,237,.22);
-  --r-lg:22px; --r-md:16px; --r-sm:10px;
-  --sidebar-w:252px;
-  --font-display:'Manrope',-apple-system,sans-serif; --font-sans:'Inter',-apple-system,sans-serif;
+  --bg:#F3F2F2; --card:#EAE9E9; --cardAlt:#EAE9E9;
+  --border:color-mix(in srgb, #201E1D 40%, transparent); --borderLit:color-mix(in srgb, #201E1D 22%, transparent);
+  --text:#201E1D; --muted:color-mix(in srgb, #201E1D 55%, transparent); --faint:color-mix(in srgb, #201E1D 40%, transparent);
+  --accent:#EC3013; --accentDim:#DD2B0F; --accentBg:#FFF2EF;
+  --green:#201E1D; --greenBg:#F8F4F4; --greenText:#201E1D;
+  --red:#AE1800; --redBg:#FFF2EF; --redText:#7C1405;
+  --amber:#EC3013; --amberBg:#FFF2EF; --amberText:#AE1800;
+  --holdBg:#F8F4F4; --holdText:#444141;
+  --shadow-soft:0 1px 2px color-mix(in srgb, #2D2B2B 14%, transparent);
+  --shadow-card:0 3px 10px color-mix(in srgb, #2D2B2B 16%, transparent);
+  --shadow-pop:0 3px 10px color-mix(in srgb, #2D2B2B 16%, transparent);
+  --r-lg:0px; --r-md:0px; --r-sm:0px;
+  --font-display:'Archivo',system-ui,sans-serif; --font-sans:'Archivo',system-ui,sans-serif;
   --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
 }
 @media(prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
-    --bg:#0F1216; --card:#171B21; --cardAlt:#1B2028; --border:#262C35; --borderLit:#333A46;
-    --text:#F1F5F9; --muted:#8B96A5; --faint:#525C6B;
-    --accent:#A78BFA; --accentDim:#8B5CF6; --accentBg:rgba(167,139,250,.16);
-    --green:#34D399; --greenBg:rgba(52,211,153,.15); --greenText:#6EE7B7;
-    --red:#FB7185; --redBg:rgba(251,113,133,.15); --redText:#FDA4AF;
-    --amber:#FBBF24; --amberBg:rgba(251,191,36,.15); --amberText:#FCD34D;
-    --holdBg:#262C35; --holdText:#9AA5B5;
-    --shadow-soft:0 2px 10px rgba(0,0,0,.35);
-    --shadow-card:0 10px 28px rgba(0,0,0,.45);
-    --shadow-pop:0 12px 32px rgba(124,58,237,.4);
+    --bg:#17161A; --card:#211F24; --cardAlt:#211F24;
+    --border:color-mix(in srgb, #F3F2F2 22%, transparent); --borderLit:color-mix(in srgb, #F3F2F2 14%, transparent);
+    --text:#F3F2F2; --muted:color-mix(in srgb, #F3F2F2 58%, transparent); --faint:color-mix(in srgb, #F3F2F2 40%, transparent);
+    --accent:#FF563C; --accentDim:#FF9783; --accentBg:color-mix(in srgb, #FF563C 18%, transparent);
+    --green:#F3F2F2; --greenBg:#26242A; --greenText:#F3F2F2;
+    --red:#FF9783; --redBg:color-mix(in srgb, #FF563C 16%, transparent); --redText:#FFC4B8;
+    --amber:#FF563C; --amberBg:color-mix(in srgb, #FF563C 18%, transparent); --amberText:#FF9783;
+    --holdBg:#26242A; --holdText:#B8B4B4;
+    --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+    --shadow-card:0 4px 14px rgba(0,0,0,.5);
+    --shadow-pop:0 4px 14px rgba(0,0,0,.5);
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0F1216; --card:#171B21; --cardAlt:#1B2028; --border:#262C35; --borderLit:#333A46;
-  --text:#F1F5F9; --muted:#8B96A5; --faint:#525C6B;
-  --accent:#A78BFA; --accentDim:#8B5CF6; --accentBg:rgba(167,139,250,.16);
-  --green:#34D399; --greenBg:rgba(52,211,153,.15); --greenText:#6EE7B7;
-  --red:#FB7185; --redBg:rgba(251,113,133,.15); --redText:#FDA4AF;
-  --amber:#FBBF24; --amberBg:rgba(251,191,36,.15); --amberText:#FCD34D;
-  --holdBg:#262C35; --holdText:#9AA5B5;
-  --shadow-soft:0 2px 10px rgba(0,0,0,.35);
-  --shadow-card:0 10px 28px rgba(0,0,0,.45);
-  --shadow-pop:0 12px 32px rgba(124,58,237,.4);
+  --bg:#17161A; --card:#211F24; --cardAlt:#211F24;
+  --border:color-mix(in srgb, #F3F2F2 22%, transparent); --borderLit:color-mix(in srgb, #F3F2F2 14%, transparent);
+  --text:#F3F2F2; --muted:color-mix(in srgb, #F3F2F2 58%, transparent); --faint:color-mix(in srgb, #F3F2F2 40%, transparent);
+  --accent:#FF563C; --accentDim:#FF9783; --accentBg:color-mix(in srgb, #FF563C 18%, transparent);
+  --green:#F3F2F2; --greenBg:#26242A; --greenText:#F3F2F2;
+  --red:#FF9783; --redBg:color-mix(in srgb, #FF563C 16%, transparent); --redText:#FFC4B8;
+  --amber:#FF563C; --amberBg:color-mix(in srgb, #FF563C 18%, transparent); --amberText:#FF9783;
+  --holdBg:#26242A; --holdText:#B8B4B4;
+  --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+  --shadow-card:0 4px 14px rgba(0,0,0,.5);
+  --shadow-pop:0 4px 14px rgba(0,0,0,.5);
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.5 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
+body{background:var(--bg);color:var(--text);font:15px/1.55 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+::selection{background:color-mix(in srgb, var(--accent) 30%, transparent)}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.wrap{max-width:1240px;margin:0 auto;padding:0 32px 80px}
-h1{font:800 26px/1.2 var(--font-display);letter-spacing:-.4px;margin:28px 0 4px}
-.tag{font-size:12.5px;color:var(--muted);font-weight:500}
+.wrap{max-width:1320px;margin:0 auto;padding:32px 32px 72px}
+h1{font:800 32px/1.15 var(--font-display);letter-spacing:-.01em;margin:0 0 4px}
+.tag{font-size:13px;color:var(--muted);font-weight:600}
 
-/* app shell: fixed left sidebar + scrolling main */
-.shell{display:flex;min-height:100vh}
-.sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--card);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
-.sidebar .brand{padding:24px 22px;display:flex;align-items:center;gap:10px}
-.sidebar .brand .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,#7C3AED,#4F46E5);
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:var(--shadow-pop)}
-.sidebar .brand h1{font:800 17px/1 var(--font-display);letter-spacing:-.3px;margin:0}
-.sidebar .brand h1 span{color:var(--accent)}
-.sidebar nav{flex:1;padding:8px 12px;display:flex;flex-direction:column;gap:3px;overflow-y:auto}
-.sidebar nav button{display:flex;align-items:center;gap:11px;background:none;border:none;color:var(--muted);
-  font:600 13.5px/1 var(--font-sans);padding:11px 13px;border-radius:12px;cursor:pointer;text-align:left;transition:.12s}
-.sidebar nav button:hover{background:var(--bg);color:var(--text)}
-.sidebar nav button.on{background:var(--accentBg);color:var(--accent);font-weight:700}
-.sidebar nav button svg{width:17px;height:17px;flex-shrink:0}
-.sidebar .promo{margin:14px;padding:16px;border-radius:var(--r-md);color:#fff;
-  background:linear-gradient(135deg,#7C3AED,#4F46E5)}
-.sidebar .promo b{font-size:12.5px;display:block;margin-bottom:4px}
-.sidebar .promo p{font-size:11px;opacity:.85;line-height:1.5}
+/* top navigation bar */
+.nav{display:flex;align-items:center;gap:26px;padding:14px 32px;border-bottom:2px solid var(--border);
+  position:sticky;top:0;background:var(--bg);z-index:20}
+.nav-brand{font:800 19px/1 var(--font-display);letter-spacing:-.01em;margin-right:auto;white-space:nowrap;display:flex;align-items:center;gap:8px}
+.nav-brand span{color:var(--accent)}
+.nav-tabs{display:flex;gap:20px;align-items:center;overflow-x:auto;scrollbar-width:none}
+.nav-tabs::-webkit-scrollbar{display:none}
+.nav-tabs button{display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--muted);
+  font:600 13.5px/1 var(--font-sans);padding:4px 0;cursor:pointer;white-space:nowrap}
+.nav-tabs button:hover{color:var(--text)}
+.nav-tabs button.on{color:var(--accent)}
+.nav-tabs button svg{width:15px;height:15px;flex-shrink:0}
 @media(max-width:880px){
-  .shell{flex-direction:column}
-  .sidebar{width:100%;height:auto;position:static;border-right:none;border-bottom:1px solid var(--border)}
-  .sidebar nav{flex-direction:row;overflow-x:auto}
-  .sidebar .promo{display:none}
+  .nav{padding:12px 18px;gap:16px}
   .wrap{padding:0 18px 60px}
 }
 
 /* search */
 .searchbar{display:flex;gap:9px;margin:22px 0 18px;position:relative}
-input,select,textarea{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 15px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none;transition:.12s}
-input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accentBg)}
-.btn{background:linear-gradient(135deg,#7C3AED,#6D28D9);color:#fff;border:none;border-radius:var(--r-sm);padding:12px 22px;font:700 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:.15s;box-shadow:var(--shadow-pop)}
-.btn:hover{filter:brightness(1.06)}
-.btn:disabled{opacity:.5;cursor:default;box-shadow:none}
-.btn.ghost{background:var(--card);border:1px solid var(--border);color:var(--muted);box-shadow:var(--shadow-soft)}
-.btn.ghost:hover{color:var(--text)}
-.btn.sm{padding:9px 15px;font-size:12.5px}
-.sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--borderLit);border-radius:var(--r-md);overflow:hidden;z-index:40;box-shadow:var(--shadow-card)}
+input,select,textarea{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 14px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none}
+input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var(--accent);outline-offset:0}
+.btn{background:var(--accent);color:var(--bg);border:1px solid transparent;border-radius:var(--r-sm);padding:11px 20px;font:800 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:.1s}
+.btn:hover{background:var(--accentDim)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn.ghost:hover{background:color-mix(in srgb, var(--text) 7%, transparent)}
+.btn.sm{padding:8px 14px;font-size:12.5px}
+.sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;z-index:40;box-shadow:var(--shadow-card)}
 .sugg div{padding:11px 15px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .sugg div:first-child{border-top:none}
 .sugg div:hover{background:var(--bg)}
 .sugg b{font-size:14px}
 .sugg span{color:var(--muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--border);padding:3px 7px;border-radius:4px}
+.sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--border);padding:3px 7px;border-radius:0}
 
 /* cards + grid */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px;align-items:start}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
-.card.alt{background:var(--card);border-color:var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-card)}
-.card h2{font:700 15.5px/1 var(--font-display);letter-spacing:-.1px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-.lbl{font-size:9.5px;letter-spacing:1.2px;text-transform:uppercase;font-weight:700;color:var(--faint)}
+.card{background:var(--card);border-radius:var(--r-md);padding:18px;margin-bottom:16px;box-shadow:none}
+.card.alt{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow-card)}
+.card h2{font:800 15px/1.2 var(--font-display);letter-spacing:-.01em;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--muted)}
 .row{display:flex;justify-content:space-between;padding:7px 0;gap:12px;font-size:12.5px}
 .row span:first-child{color:var(--muted);font-weight:500}
 .row span:last-child{font-weight:700;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
-.rule{height:1px;background:var(--border);margin:14px 0}
+.rule{height:2px;background:var(--border);margin:14px 0}
 .note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px}
 .plain{font-size:13.5px;line-height:1.6}
 .dim{color:var(--muted)}
 .mut{color:var(--muted);font-size:12.5px;line-height:1.55}
 
-/* hero gradient stat cards — the signature element */
-.hero{position:relative;overflow:hidden;border-radius:28px;color:#fff;padding:32px;margin-bottom:18px;box-shadow:var(--shadow-pop)}
-.hero.emerald{background:linear-gradient(135deg,#10B981,#0D9488)}
-.hero.violet{background:linear-gradient(135deg,#6D28D9,#4338CA)}
-.hero::before{content:"";position:absolute;right:-40px;top:-64px;width:280px;height:280px;border-radius:50%;background:rgba(255,255,255,.1)}
-.hero::after{content:"";position:absolute;left:30%;bottom:-96px;width:240px;height:240px;border-radius:50%;background:rgba(255,255,255,.06)}
+/* stat-card strips — flat, divided columns instead of a gradient hero */
+.hero{position:relative;background:var(--card);color:var(--text);padding:18px 22px;margin-bottom:18px;box-shadow:none;border-radius:var(--r-md)}
+.hero.violet{border:2px solid var(--accent)}
 .hero-body{position:relative;display:flex;flex-wrap:wrap;gap:24px}
 .hero-main{flex:1.4;min-width:220px}
-.hero-main .k{font-size:13px;font-weight:500;opacity:.9;margin-bottom:8px}
-.hero-main .v{font:800 42px/1 var(--font-display);letter-spacing:-.5px}
-.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.2);padding:5px 11px;border-radius:9px;font-size:13px;font-weight:700;margin-top:10px}
-.hero-side{min-width:120px}
-.hero-side .k{font-size:11px;font-weight:600;opacity:.8;margin-bottom:4px}
-.hero-side .v{font:700 22px/1.2 var(--font-display)}
+.hero-main .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--muted);margin-bottom:8px}
+.hero-main .v{font:800 38px/1 var(--font-display);letter-spacing:-.01em}
+.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:var(--holdBg);color:var(--text);padding:5px 11px;border-radius:0;font-size:12.5px;font-weight:700;margin-top:10px}
+.hero-side{min-width:120px;border-left:1px solid var(--border);padding-left:18px}
+.hero-side .k{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--muted);margin-bottom:5px}
+.hero-side .v{font:800 20px/1.2 var(--font-display)}
 
 /* verdict/gauge — kept for backwards compat with any inline usage */
-.readout{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.readout{background:var(--card);border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:none}
 .readout .top{display:flex;justify-content:space-between;align-items:flex-start}
-.verdict{font:800 40px/1 var(--font-display);letter-spacing:-.5px;margin-top:6px}
+.verdict{font:800 38px/1 var(--font-display);letter-spacing:-.01em;margin-top:6px}
 .meter{display:flex;align-items:flex-end;height:14px;gap:3px;justify-content:flex-end}
-.seg{width:5px;border-radius:2px;background:var(--border)}
+.seg{width:5px;border-radius:0;background:var(--border)}
 .grad{margin:16px 0 14px}
-.gradline{height:2px;border-radius:1px;background:var(--border)}
+.gradline{height:2px;border-radius:0;background:var(--border)}
 .gradticks{display:flex;justify-content:space-between;margin-top:-2px}
 .gradticks i{width:2px;height:4px;background:var(--border);display:block}
 .gradticks i:nth-child(4n+1){height:8px;background:var(--borderLit)}
@@ -180,7 +171,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 
 /* AI badge — marks anything Claude-generated */
 .ai-badge-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-.ai-badge{background:var(--accentBg);color:var(--accent);font:800 10px/1 var(--font-sans);letter-spacing:.5px;padding:5px 9px;border-radius:7px}
+.ai-badge{background:var(--accentBg);color:var(--red);font:800 10px/1 var(--font-sans);letter-spacing:.5px;padding:4px 8px;border-radius:0}
 
 /* gauge (circular conviction score) */
 .gauge-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
@@ -189,63 +180,65 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .gauge .num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
 .gauge .num b{font:800 44px/1 var(--font-display)}
 .gauge .num span{font-size:11px;opacity:.75;margin-top:3px}
-.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);padding:8px 15px;border-radius:11px;font:700 13px/1 var(--font-sans)}
+.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:color-mix(in srgb, var(--text) 8%, transparent);padding:7px 14px;border-radius:0;font:700 13px/1 var(--font-sans)}
 
 /* banners */
-.banner{background:var(--card);border:1px solid var(--border);border-left:4px solid;border-radius:var(--r-sm);padding:14px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.banner{background:var(--card);border-left:4px solid;border-radius:0;padding:14px;margin-bottom:16px;box-shadow:none}
 .banner p{font-size:12px;line-height:1.55;margin-top:6px}
-.pill{border:1px solid;border-radius:8px;padding:5px 12px;font:700 12px/1 var(--font-sans)}
-.mini{border:1px solid transparent;border-radius:6px;padding:4px 9px;font:800 10px/1 var(--font-sans);letter-spacing:.3px}
+.pill{border:1px solid;border-radius:0;padding:5px 12px;font:700 12px/1 var(--font-sans)}
+.mini{border:1px solid transparent;border-radius:0;padding:4px 9px;font:800 10px/1 var(--font-sans);letter-spacing:.3px}
 
 /* chart */
 .ranges{display:flex;gap:6px;margin:16px 0 10px;flex-wrap:wrap}
-.ranges button{background:none;border:none;color:var(--muted);font:700 11.5px/1 var(--font-sans);padding:6px 12px;border-radius:8px;cursor:pointer}
-.ranges button.on{background:var(--accentBg);color:var(--accent)}
+.ranges button{background:none;border:none;color:var(--muted);font:700 11.5px/1 var(--font-sans);padding:6px 12px;border-radius:0;cursor:pointer}
+.ranges button.on{background:var(--accentBg);color:var(--red)}
 svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 
 /* lists */
-.srow{display:flex;align-items:center;gap:12px;padding:11px 8px;border-radius:12px;cursor:pointer;transition:.1s}
-.srow:hover{background:var(--bg)}
+.srow{display:flex;align-items:center;gap:12px;padding:11px 8px;border-radius:0;cursor:pointer}
+.srow:hover{background:color-mix(in srgb, var(--text) 4%, transparent)}
 .srow:hover b{color:var(--accent)}
 .srow b{font-size:14px}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
 .prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-radius:var(--r-sm);background:var(--bg);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
+.hl{border-radius:0;background:var(--bg);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
 .hl .t{font-size:13px;line-height:1.45;margin-top:5px}
 .hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.45}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-.chip{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px 15px;font:700 12.5px/1 var(--font-sans);color:var(--muted);cursor:pointer;box-shadow:var(--shadow-soft)}
+.chip{background:var(--card);border:1px solid var(--border);border-radius:0;padding:8px 15px;font:700 12.5px/1 var(--font-sans);color:var(--muted);cursor:pointer;box-shadow:none}
 .chip.on{background:var(--text);border-color:var(--text);color:var(--bg)}
 .link{color:var(--accent);font:700 12px/1 var(--font-sans);cursor:pointer;background:none;border:none;padding:0}
 .center{text-align:center;padding:56px 20px;color:var(--muted)}
 .center h3{color:var(--text);font-size:16px;margin-bottom:7px;font-family:var(--font-display)}
-.err{background:var(--redBg);border:1px solid var(--red);border-radius:var(--r-sm);padding:14px;margin-bottom:16px}
+.err{background:var(--redBg);border:1px solid var(--red);border-radius:0;padding:14px;margin-bottom:16px}
 .err b{color:var(--redText);display:block;margin-bottom:4px;font-size:14px}
 .exp{margin-top:12px}
-.expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:var(--r-sm);padding:13px;margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--text)}
+.expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:0;padding:13px;margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--text)}
 .spin{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
-.big{font:800 36px/1 var(--font-display);letter-spacing:-.5px}
+.big{font:800 34px/1 var(--font-display);letter-spacing:-.01em}
 .chg{font:700 13.5px var(--font-sans);margin-top:6px}
 .split{display:flex;gap:16px;margin:10px 0}
 .split div{flex:1}
 .split b{display:block;font:700 19px var(--font-display);margin-top:4px}
-.modal{position:fixed;inset:0;background:rgba(15,17,22,.6);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
-.modal .box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:24px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-card)}
-.opt{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-top:8px;cursor:pointer}
+.modal{position:fixed;inset:0;background:color-mix(in srgb, #2D2B2B 50%, transparent);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal .box{background:var(--card);border-radius:var(--r-lg);padding:24px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-card)}
+.opt{background:var(--bg);border:1px solid var(--border);border-radius:0;padding:14px;margin-top:8px;cursor:pointer}
 .opt.on{border-color:var(--accent);background:var(--accentBg)}
 .opt b{display:block;font-size:14px}
 .opt span{color:var(--muted);font-size:11.5px}
 
-/* badges: BUY / SELL / HOLD, ticker avatars — used across screens */
-.sig-badge{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:9px;font:800 11px/1 var(--font-sans)}
-.sig-badge.buy{background:var(--greenBg);color:var(--greenText)}
+/* badges: BUY / SELL / HOLD, ticker avatars — used across screens.
+   Mono palette convention: BUY inverts to solid ink (no green exists in
+   this system), SELL/warnings use the accent ramp, HOLD stays neutral. */
+.sig-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:0;font:800 11px/1 var(--font-sans);letter-spacing:.02em}
+.sig-badge.buy{background:var(--text);color:var(--bg)}
 .sig-badge.sell{background:var(--redBg);color:var(--redText)}
 .sig-badge.hold{background:var(--holdBg);color:var(--holdText)}
-.avatar{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font:800 11px/1 var(--font-sans);flex-shrink:0}
+.avatar{width:38px;height:38px;border-radius:0;display:flex;align-items:center;justify-content:center;color:var(--bg);font:800 11px/1 var(--font-sans);flex-shrink:0}
 
-@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding:22px;border-radius:22px}.hero-main .v{font-size:32px}}
+@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding:16px}.hero-main .v{font-size:30px}}
 </style>
 </head>
 <body>
@@ -579,17 +572,13 @@ async function api(path, opts) {
   return j;
 }
 
-function Logo({light}) {
+function Logo() {
   const h = [9,15,12,22];
-  const bar = light ? "rgba(255,255,255,.85)" : "var(--accentDim)";
-  const barTop = light ? "#fff" : "var(--accent)";
-  const base = light ? "#fff" : "var(--text)";
-  const tick = light ? "rgba(255,255,255,.6)" : "var(--faint)";
   return <svg width="20" height="18" viewBox="0 0 34 30">
-    {h.map((v,i)=><rect key={i} x={2.4+i*7.8} y={25-v} width="5.2" height={v} rx="1.1"
-      fill={i===3?barTop:bar}/>)}
-    <rect x="0" y="25" width="34" height="1.8" rx=".9" fill={base}/>
-    {[0,1,2,3,4,5,6].map(i=><rect key={i} x={i*5.4+.4} y="27.4" width="1.1" height="3" rx=".5" fill={tick}/>)}
+    {h.map((v,i)=><rect key={i} x={2.4+i*7.8} y={25-v} width="5.2" height={v}
+      fill={i===3?"var(--accent)":"var(--text)"}/>)}
+    <rect x="0" y="25" width="34" height="1.8" fill="var(--text)"/>
+    {[0,1,2,3,4,5,6].map(i=><rect key={i} x={i*5.4+.4} y="27.4" width="1.1" height="3" fill="var(--faint)"/>)}
   </svg>;
 }
 
@@ -872,7 +861,7 @@ function Sizer({entry, stop, currency, portfolioValue}) {
   const amt = portfolioValue*(risk/100);
   const shares = Math.floor(amt/perShare);
   const val = shares*entry, weight = (val/portfolioValue)*100;
-  return <div style={{background:"var(--bg)",borderRadius:10,padding:13,marginTop:14}}>
+  return <div style={{background:"var(--bg)",borderRadius:0,padding:13,marginTop:14}}>
     <b style={{fontSize:13.5}}>Position Sizing</b>
     <p className="mut" style={{marginTop:3}}>How much to buy so a stop-out costs a fixed, survivable amount.</p>
     <div className="lbl" style={{margin:"14px 0 8px"}}>Risk per trade</div>
@@ -899,7 +888,7 @@ function EarningsTrack({quarters}) {
       {recent.map((qq,i)=>{
         const beat = qq.surprise_pct!=null ? qq.surprise_pct>0 : null;
         const c = beat==null?"var(--muted)":beat?"var(--green)":"var(--red)";
-        return <div key={i} style={{flex:1,textAlign:"center",padding:8,borderRadius:8,background:"var(--card)",border:"1px solid var(--border)"}}>
+        return <div key={i} style={{flex:1,textAlign:"center",padding:8,borderRadius:0,background:"var(--card)",border:"1px solid var(--border)"}}>
           <div style={{color:c,fontSize:13}}>{beat==null?"–":beat?"✓":"✕"}</div>
         </div>;
       })}
@@ -1002,16 +991,17 @@ function Analyze({state, dispatch}) {
       </div>}
       {decision && (()=>{
         const R = 76, C = 2*Math.PI*R, score = decision.conviction_score;
-        const strokeColor = score>=65 ? "#6EE7B7" : score<40 ? "#FDA4AF" : "#FCD34D";
+        const strokeColor = score>=65 ? "var(--text)" : score<40 ? "var(--accent)" : "var(--accentDim)";
+        const tileBg = "color-mix(in srgb, var(--text) 6%, transparent)";
         return <div className="hero violet">
           <div className="ai-badge-row" style={{position:"relative"}}>
-            <span className="ai-badge" style={{background:"rgba(255,255,255,.18)",color:"#fff"}}>✨ AI DECISION ENGINE</span>
+            <span className="ai-badge">✨ AI DECISION ENGINE</span>
           </div>
           <div className="hero-body" style={{position:"relative",alignItems:"center"}}>
             <div className="gauge-wrap">
               <div className="gauge">
                 <svg viewBox="0 0 176 176">
-                  <circle cx="88" cy="88" r={R} fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="14"/>
+                  <circle cx="88" cy="88" r={R} fill="none" stroke="var(--border)" strokeWidth="14"/>
                   <circle cx="88" cy="88" r={R} fill="none" stroke={strokeColor} strokeWidth="14" strokeLinecap="round"
                     strokeDasharray={C} strokeDashoffset={C*(1-score/100)}/>
                 </svg>
@@ -1026,25 +1016,25 @@ function Analyze({state, dispatch}) {
                 const cols = [decision.entry!=null, decision.stop_loss!=null, decision.take_profit!=null, decision.risk_reward_ratio!=null]
                   .filter(Boolean).length;
                 return <div style={{display:"grid",gridTemplateColumns:`repeat(${cols},1fr)`,gap:10,marginBottom:14}}>
-                  {decision.entry != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Entry</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  {decision.entry != null && <div style={{background:tileBg,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Entry</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
-                  {decision.stop_loss != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FDA4AF"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  {decision.stop_loss != null && <div style={{background:tileBg,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"var(--red)"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
-                  {decision.take_profit != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#6EE7B7"}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.75}}>{data.currency}</span></div>
+                  {decision.take_profit != null && <div style={{background:tileBg,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
-                  {decision.risk_reward_ratio != null && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:12}}>
-                    <div style={{fontSize:10.5,fontWeight:700,opacity:.8,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"#FCD34D"}}>{decision.risk_reward_ratio} : 1</div>
+                  {decision.risk_reward_ratio != null && <div style={{background:tileBg,padding:12}}>
+                    <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.risk_reward_ratio} : 1</div>
                   </div>}
                 </div>;
               })()}
-              {decision.rationale && <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:14,fontSize:13,lineHeight:1.55}}>
+              {decision.rationale && <div style={{background:tileBg,padding:14,fontSize:13,lineHeight:1.55}}>
                 {decision.rationale}
               </div>}
             </div>
@@ -1150,7 +1140,7 @@ function Analyze({state, dispatch}) {
             <div className="row"><span>Bullish score</span>
               <span style={{color:data.sentiment_analysis.bullish_score>.6?"var(--green)":data.sentiment_analysis.bullish_score<.4?"var(--red)":"var(--amber)"}}>
                 {Math.round(data.sentiment_analysis.bullish_score*100)}%</span></div>
-            <div style={{height:8,borderRadius:4,background:"var(--border)",overflow:"hidden",marginTop:4}}>
+            <div style={{height:8,borderRadius:0,background:"var(--border)",overflow:"hidden",marginTop:4}}>
               <div style={{height:"100%",width:`${data.sentiment_analysis.bullish_score*100}%`,
                 background:data.sentiment_analysis.bullish_score>.6?"var(--green)":data.sentiment_analysis.bullish_score<.4?"var(--red)":"var(--amber)"}}/></div>
             <p className="plain" style={{marginTop:12}}>{data.sentiment_analysis.overall_impact}</p>
@@ -1203,20 +1193,8 @@ function HeldCard({h,d,pv}) {
 }
 
 /* ===== Portfolio ===== */
-// Deterministic gradient per ticker, so avatars stay colorful and varied
-// without needing a hand-maintained per-symbol color list.
-const AVATAR_GRADIENTS = [
-  ["#FB923C","#EF4444"], ["#38BDF8","#2563EB"], ["#818CF8","#7C3AED"],
-  ["#FB7185","#E11D48"], ["#34D399","#0D9488"], ["#64748B","#334155"],
-  ["#FBBF24","#EA580C"], ["#22D3EE","#0891B2"],
-];
-function tickerGradient(t) {
-  let h = 0;
-  for (let i = 0; i < (t||"").length; i++) h = (h*31 + t.charCodeAt(i)) | 0;
-  const [a,b] = AVATAR_GRADIENTS[Math.abs(h) % AVATAR_GRADIENTS.length];
-  return `linear-gradient(135deg,${a},${b})`;
-}
-const Avatar = ({t}) => <div className="avatar" style={{background:tickerGradient(t)}}>{(t||"").replace(/\..*/,"").slice(0,4)}</div>;
+// Modernist is mono — avatars are flat solid ink, not a per-ticker rainbow.
+const Avatar = ({t}) => <div className="avatar" style={{background:"var(--text)"}}>{(t||"").replace(/\..*/,"").slice(0,4)}</div>;
 const SigBadge = ({sig}) => <span className={"sig-badge "+(sig==="BUY"?"buy":sig==="SELL"?"sell":"hold")}>{sig}</span>;
 
 function Portfolio({state, dispatch}) {
@@ -1386,7 +1364,7 @@ function Portfolio({state, dispatch}) {
       <h3>No holdings yet</h3><p>Add what you own to track profit/loss and get momentum signals on each position.</p></div>}
 
     {!busy && (holdings.length>0 || cash!==0) && <>
-      <div className="hero emerald">
+      <div className="hero">
         <div className="hero-body">
           <div className="hero-main">
             <div className="k">Total Portfolio Value (CAD)</div>
@@ -1421,7 +1399,7 @@ function Portfolio({state, dispatch}) {
             c={res.concentration.largest_position_pct>30?"var(--amber)":null}/>}
         {Object.entries(res.concentration.sector_concentration||{}).slice(0,4).map(([s,p])=>
           <Row key={s} l={s} v={`${p}%`} c={p>40?"var(--amber)":null}/>)}
-        <div style={{background:"var(--amberBg)",borderRadius:8,padding:11,marginTop:12}}>
+        <div style={{background:"var(--amberBg)",borderRadius:0,padding:11,marginTop:12}}>
           {res.concentration.warnings.map((w,i)=><p key={i} style={{fontSize:11.5,lineHeight:1.55,marginBottom:5}}>• {w}</p>)}
         </div>
         <Exp text={res.concentration.note}/>
@@ -1480,7 +1458,7 @@ function Portfolio({state, dispatch}) {
                   const dec = decisions[hKey];
                   const R = 30, C = 2*Math.PI*R, score = dec.conviction_score;
                   const strokeColor = score>=65 ? "var(--green)" : score<40 ? "var(--red)" : "var(--amber)";
-                  return <div style={{display:"flex",gap:12,alignItems:"center",background:"var(--accentBg)",borderRadius:12,padding:12}}>
+                  return <div style={{display:"flex",gap:12,alignItems:"center",background:"var(--accentBg)",borderRadius:0,padding:12}}>
                     <div className="gauge" style={{width:64,height:64,flexShrink:0}}>
                       <svg viewBox="0 0 76 76">
                         <circle cx="38" cy="38" r={R} fill="none" stroke="var(--border)" strokeWidth="7"/>
@@ -1601,7 +1579,7 @@ function Brief({state, dispatch}) {
     {busy && <Spin t="Scanning markets…"/>}
     {err && <div className="err"><b>Couldn't load brief</b>{err}</div>}
     {d && !busy && <>
-      <div className="hero emerald">
+      <div className="hero">
         <div className="hero-body">
           <div className="hero-main">
             <div className="k">Today's Signal</div>
@@ -1933,14 +1911,14 @@ function Activity({state, dispatch}) {
           before your export's date range. This may overstate the total.
         </p>}
         {pl.byTicker.length>0 && <div style={{position:"relative",marginTop:14}}>
-          <button className="link" style={{color:"#fff"}} onClick={()=>setShowByTicker(!showByTicker)}>
+          <button className="link" onClick={()=>setShowByTicker(!showByTicker)}>
             {showByTicker?"Hide":"Show"} breakdown by ticker →
           </button>
-          {showByTicker && <div style={{marginTop:10,background:"rgba(255,255,255,.12)",borderRadius:12,padding:"4px 14px"}}>
+          {showByTicker && <div style={{marginTop:10,background:"color-mix(in srgb, var(--text) 6%, transparent)",padding:"4px 14px"}}>
             {pl.byTicker.map((t,i)=>
-              <div key={`${t.ticker}-${t.account}-${i}`} className="row" style={{borderBottom:i<pl.byTicker.length-1?"1px solid rgba(255,255,255,.15)":"none"}}>
-                <span style={{color:"rgba(255,255,255,.85)"}}>{t.ticker}{t.account?` · ${t.account}`:""}</span>
-                <span style={{color:t.realized>=0?"#6EE7B7":"#FDA4AF"}}>
+              <div key={`${t.ticker}-${t.account}-${i}`} className="row" style={{borderBottom:i<pl.byTicker.length-1?"1px solid var(--border)":"none"}}>
+                <span style={{color:"var(--muted)"}}>{t.ticker}{t.account?` · ${t.account}`:""}</span>
+                <span style={{color:t.realized>=0?"var(--text)":"var(--red)"}}>
                   {t.realized>=0?"+":""}{fmt(Math.round(t.realized*100)/100)}
                 </span>
               </div>)}
@@ -2153,9 +2131,9 @@ function Settings({state}) {
 
     <div className="card">
       <h2>Appearance</h2>
-      <p className="mut" style={{marginBottom:12}}>Light and dark both use the same color system — pick one, or match your device automatically.</p>
+      <p className="mut" style={{marginBottom:12}}>Light and dark both use the same design system — pick one, or match your device automatically.</p>
       <div className="chips" style={{marginBottom:0}}>
-        {[["system","Match device"],["light","☀️ Light"],["dark","🌙 Dark"]].map(([k,l])=>
+        {[["system","Match device"],["light","Light"],["dark","Dark"]].map(([k,l])=>
           <div key={k} className={"chip"+(theme===k?" on":"")} onClick={()=>setTheme(k)}>{l}</div>)}
       </div>
     </div>
@@ -2184,7 +2162,7 @@ function LogModal({data, onSave, onClose}) {
   return <div className="modal" onClick={e=>e.target===e.currentTarget&&onClose()}>
     <div className="box">
       <h2>Log decision — {data.ticker}<button className="link" onClick={onClose}>✕</button></h2>
-      <div style={{background:"var(--card)",borderRadius:10,padding:13,marginBottom:14}}>
+      <div style={{background:"var(--card)",borderRadius:0,padding:13,marginBottom:14}}>
         <div className="lbl">The app said</div>
         <b className="num" style={{color:SIG[t.signal],fontSize:15,display:"block",marginTop:5}}>
           {t.signal} · {t.conviction} conviction · {data.current_price}</b>
@@ -2242,13 +2220,13 @@ function App() {
     const darkMeta = document.getElementById("theme-color-dark");
     if (theme === "light" || theme === "dark") {
       document.documentElement.setAttribute("data-theme", theme);
-      const color = theme === "dark" ? "#0F1216" : "#F7F7FB";
+      const color = theme === "dark" ? "#17161A" : "#F3F2F2";
       lightMeta.setAttribute("content", color);
       darkMeta.setAttribute("content", color);
     } else {
       document.documentElement.removeAttribute("data-theme");
-      lightMeta.setAttribute("content", "#F7F7FB");
-      darkMeta.setAttribute("content", "#0F1216");
+      lightMeta.setAttribute("content", "#F3F2F2");
+      darkMeta.setAttribute("content", "#17161A");
     }
     try { theme === "system" ? localStorage.removeItem("ma_theme") : localStorage.setItem("ma_theme", theme); } catch {}
   }, [theme]);
@@ -2257,10 +2235,23 @@ function App() {
     setScanTickers(list); store.set("ma_scan_tickers", list);
   }, []);
 
-  const analyze = useCallback(async sym => {
+  const analyze = useCallback(async (sym, opts={}) => {
     const s = (sym||"").trim().toUpperCase();
     if (!s) return;
     setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null); setVerdictLoading(false);
+    // Pushes a real history entry so the mouse/browser back button steps
+    // back through in-app navigation instead of leaving the site — see the
+    // popstate listener below. skipHistory is set only when this call is
+    // itself restoring state in response to a popstate. Looking up another
+    // ticker while already on Analyze *replaces* the current entry rather
+    // than stacking a new one — otherwise "← Back to Portfolio" would need
+    // one click per intermediate ticker instead of returning in one hop.
+    if (!opts.skipHistory) {
+      const url = `#/analyze/${encodeURIComponent(s)}`;
+      const histState = {tab:"analyze", ticker:s, returnTab: opts.returnTab ?? null};
+      if (opts.replace) history.replaceState(histState, "", url);
+      else history.pushState(histState, "", url);
+    }
     try {
       const d = await api(`/api/analyze/${encodeURIComponent(s)}`);
       setData(d);
@@ -2270,6 +2261,36 @@ function App() {
     }
     catch(e){ setErr(e.message); } finally { setBusy(false); }
   },[]);
+
+  // Browser/mouse back-forward support: every tab switch and ticker lookup
+  // pushes a history entry (see analyze() above and the nav click handler
+  // below), and this listener restores app state on popstate — so back/
+  // forward navigate between in-app screens instead of leaving the page.
+  // Also seeds the initial entry so a deep link (e.g. #/analyze/AAPL) or a
+  // plain reload lands on the right screen.
+  useEffect(() => {
+    const parseHash = () => {
+      const m = location.hash.match(/^#\/([a-z]+)(?:\/([^/]+))?$/i);
+      const t = m && m[1].toLowerCase();
+      if (!m || !TAB_LABELS[t]) return {tab:"analyze", ticker:null};
+      let ticker = null;
+      if (m[2]) { try { ticker = decodeURIComponent(m[2]); } catch { ticker = null; } }
+      return {tab:t, ticker};
+    };
+    const initial = parseHash();
+    history.replaceState({tab:initial.tab, ticker:initial.ticker, returnTab:null}, "", location.hash || `#/${initial.tab}`);
+    if (initial.ticker) analyze(initial.ticker, {skipHistory:true});
+    else if (initial.tab !== "analyze") setTab(initial.tab);
+
+    const onPop = e => {
+      const st = e.state || parseHash();
+      setReturnTab(st.returnTab ?? null);
+      if (st.tab === "analyze" && st.ticker) analyze(st.ticker, {skipHistory:true});
+      else setTab(st.tab || "analyze");
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  },[analyze]);
 
   const requestDecision = useCallback(async () => {
     const s = data?.ticker;
@@ -2294,14 +2315,22 @@ function App() {
   const dispatch = useCallback(a => {
     switch(a.type){
       case "q": setQ(a.v); break;
-      case "analyze":
+      case "analyze": {
         // Remember where we came from, so Analyze can offer a way back —
         // but only when leaving a different tab, not when jumping between
         // tickers while already on Analyze (that shouldn't overwrite it).
-        if (tab !== "analyze") setReturnTab(tab);
-        analyze(a.ticker);
+        // Also already on Analyze: replace the history entry rather than
+        // stacking a new one, so "← Back to X" is always exactly one hop.
+        const cameFromElsewhere = tab !== "analyze";
+        const rt = cameFromElsewhere ? tab : returnTab;
+        if (cameFromElsewhere) setReturnTab(tab);
+        analyze(a.ticker, {returnTab: rt, replace: !cameFromElsewhere});
         break;
-      case "back": setTab(returnTab || "analyze"); setReturnTab(null); break;
+      }
+      // Reuses the actual browser history stack rather than a separate
+      // in-app "back" concept — history.back() fires the popstate listener
+      // in the effect above, which restores returnTab/tab/ticker together.
+      case "back": history.back(); break;
       case "watch": { const n = watchlist.includes(a.ticker)?watchlist.filter(t=>t!==a.ticker):[...watchlist,a.ticker];
         setWatchlist(n); store.set("ma_watchlist",n); break; }
       case "holdings": setHoldings(a.v); store.set("ma_portfolio",a.v); break;
@@ -2317,32 +2346,27 @@ function App() {
     scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme};
 
   return <>
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="logo"><Logo light/></div>
-          <h1>Market<span>Analyzer</span></h1>
-        </div>
-        <nav>{TABS.map(([k,l,icon])=>
-          <button key={k} className={tab===k?"on":""}
-            onClick={()=>{if (k!==tab) setReturnTab(null); setTab(k);}}>
-            <NavIcon name={icon}/>{l}
-          </button>)}</nav>
-        <div className="promo">
-          <b>✨ AI Signals Active</b>
-          <p>Real-time conviction scoring across your holdings.</p>
-        </div>
-      </aside>
-      <div className="wrap" style={{flex:1,minWidth:0}}>
-        {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
-        {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
-        {tab==="activity" && <Activity state={state} dispatch={dispatch}/>}
-        {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
-        {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
-        {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
-        {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
-        {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
-      </div>
+    <nav className="nav">
+      <div className="nav-brand"><Logo/> Market<span>Analyzer</span></div>
+      <div className="nav-tabs">{TABS.map(([k,l,icon])=>
+        <button key={k} className={tab===k?"on":""} aria-current={tab===k?"page":undefined}
+          onClick={()=>{
+            if (k===tab) return;
+            setReturnTab(null); setTab(k);
+            history.pushState({tab:k, ticker:null, returnTab:null}, "", `#/${k}`);
+          }}>
+          <NavIcon name={icon}/>{l}
+        </button>)}</div>
+    </nav>
+    <div className="wrap">
+      {tab==="analyze" && <Analyze state={state} dispatch={dispatch}/>}
+      {tab==="portfolio" && <Portfolio state={state} dispatch={dispatch}/>}
+      {tab==="activity" && <Activity state={state} dispatch={dispatch}/>}
+      {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
+      {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
+      {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
+      {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
+      {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
     </div>
     {logOpen && data && <LogModal data={data} onClose={()=>setLogOpen(false)}
       onSave={e=>{ const n=[e,...journal]; setJournal(n); store.set("ma_journal",n); setLogOpen(false);
