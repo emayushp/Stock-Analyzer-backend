@@ -452,10 +452,17 @@ function parseHoldingsCSV(text) {
 }
 
 function mergeHoldings(existing, imported) {
-  const key = (h) => `${h.ticker}__${h.account || ""}`;
-  const map = new Map(existing.map((h) => [key(h), h]));
-  for (const h of imported) map.set(key(h), h);
-  return Array.from(map.values());
+  // A CSV export is the full current state for whichever account(s) it
+  // covers, not a delta — so for any account this import touches, every
+  // existing holding under that account is dropped first (a stale,
+  // already-sold position no longer in the export would otherwise linger
+  // forever) and replaced wholesale with the file's contents. Holdings
+  // under an account this particular export doesn't cover (e.g. importing
+  // just an FHSA snapshot) are left untouched, same as a manually-added
+  // holding with no account tag at all.
+  const importedAccounts = new Set(imported.map((h) => h.account || ""));
+  const kept = existing.filter((h) => !importedAccounts.has(h.account || ""));
+  return [...kept, ...imported];
 }
 
 function activityKey(a) {
