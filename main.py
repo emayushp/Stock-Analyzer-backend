@@ -530,9 +530,21 @@ def detect_market(ticker: str) -> str:
 
 
 def fetch_price_history(ticker: str):
-    """6 months of daily bars — enough for a 26/9 MACD, 14-day RSI and 20-day volume avg."""
+    """6 months of daily bars — enough for a 26/9 MACD, 14-day RSI and 20-day volume avg.
+
+    Retries with a longer lookback if that window comes back thin or empty —
+    thinly-traded listings (CAD-hedged CDRs on NEO/.NE in particular) sometimes
+    return a sparse/empty 6-month window from Yahoo even though a longer window
+    has plenty of history. Same retry already proven in batch_score()'s own
+    fallback path, applied here so the single-ticker /api/analyze endpoint gets
+    the same fix, not just the portfolio/screener batch path."""
     stock = yf.Ticker(ticker)
     hist = stock.history(period="6mo", interval="1d", auto_adjust=True)
+    if hist is None or hist.empty or len(hist) < 30:
+        current_len = 0 if hist is None else len(hist)
+        longer = stock.history(period="2y", interval="1d", auto_adjust=True)
+        if longer is not None and not longer.empty and len(longer) > current_len:
+            hist = longer
     return stock, hist
 
 
