@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
 import auth as auth_lib
@@ -4130,7 +4131,14 @@ def signup(request: SignupRequest):
             raise HTTPException(status_code=409, detail="An account with this email already exists — try logging in instead.")
         user = db_lib.User(email=email, password_hash=auth_lib.hash_password(request.password))
         session.add(user)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            # Two signups for the same email racing past the check above —
+            # the unique index catches the loser here instead of both
+            # succeeding, so turn it into the same 409 rather than a raw 500.
+            session.rollback()
+            raise HTTPException(status_code=409, detail="An account with this email already exists — try logging in instead.")
         session.refresh(user)
         token = auth_lib.create_token(user.id)
         if token is None:
@@ -4190,10 +4198,25 @@ def sync_set_key(key: str, request: SyncSetRequest, current_user: Dict[str, Any]
         if row:
             row.value = request.value
             row.updated_at = datetime.now(timezone.utc)
+            session.commit()
         else:
-            row = db_lib.UserData(user_id=current_user["id"], key=key, value=request.value)
-            session.add(row)
-        session.commit()
+            # Two devices can race to create the same not-yet-existing key at
+            # once (e.g. both pushing up local data right after login) — the
+            # unique (user_id, key) constraint catches the loser here, which
+            # retries as an update instead of raising.
+            session.add(db_lib.UserData(user_id=current_user["id"], key=key, value=request.value))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                row = session.query(db_lib.UserData).filter(
+                    db_lib.UserData.user_id == current_user["id"], db_lib.UserData.key == key,
+                ).first()
+                if row is None:
+                    raise
+                row.value = request.value
+                row.updated_at = datetime.now(timezone.utc)
+                session.commit()
         return {"ok": True}
     finally:
         session.close()

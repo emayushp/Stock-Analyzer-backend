@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -60,6 +61,7 @@ class UserData(Base):
 _engine = None
 _SessionLocal = None
 _unavailable_logged = False
+_init_lock = threading.Lock()
 
 
 def get_engine():
@@ -72,13 +74,24 @@ def get_engine():
             logger.info("DATABASE_URL not set — cross-device sync disabled, rest of the app is unaffected.")
             _unavailable_logged = True
         return None
-    # Some providers (Render, Heroku-style) hand out postgres:// URLs;
-    # SQLAlchemy's psycopg2 driver requires the postgresql:// scheme.
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
-    _engine = create_engine(url, pool_pre_ping=True)
-    Base.metadata.create_all(_engine)
-    _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+    # FastAPI serves requests concurrently across threads, and the very
+    # first requests after a cold start can all race in here at once before
+    # _engine is set — without a lock, several threads would each run
+    # create_engine()/create_all() concurrently, and Base.metadata.create_all()
+    # is not safe to run from multiple connections at the same time (each
+    # checks "does this table exist" before creating it, so two connections
+    # racing that check can both attempt to create the same table).
+    with _init_lock:
+        if _engine is not None:
+            return _engine
+        # Some providers (Render, Heroku-style) hand out postgres:// URLs;
+        # SQLAlchemy's psycopg2 driver requires the postgresql:// scheme.
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://"):]
+        engine = create_engine(url, pool_pre_ping=True)
+        Base.metadata.create_all(engine)
+        _SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        _engine = engine
     return _engine
 
 

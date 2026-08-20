@@ -252,8 +252,58 @@ const API = "";  // same origin as the backend serving this page
 const mem = {};
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : (mem[k] ?? d); } catch { return mem[k] ?? d; } },
-  set(k, v) { mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set(k, v) { mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} syncPush(k, v); },
 };
+
+// Cross-device sync (optional, opt-in via Settings → Account). Everything
+// above still works with zero server — this just mirrors the same keys up
+// to the backend when a person is signed in, so the same data follows them
+// to another device instead of being stuck in this one browser's storage.
+const AUTH_TOKEN_KEY = "ma_auth_token";
+const AUTH_EMAIL_KEY = "ma_auth_email";
+const SYNC_ALLOWED_KEYS = new Set([
+  "ma_portfolio","ma_watchlist","ma_cash","ma_journal","ma_activity",
+  "ma_scan_tickers","ma_risk_pct","ma_currency","ma_ai_decisions",
+]);
+
+function authToken() { try { return localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; } }
+
+// Fire-and-forget: called from every store.set(), so ongoing edits made
+// anywhere in the app (holdings, journal, settings, ...) stay synced
+// without each call site needing to know sync exists.
+function syncPush(key, value) {
+  if (!SYNC_ALLOWED_KEYS.has(key)) return;
+  const token = authToken();
+  if (!token) return;
+  api(`/api/sync/${key}`, {
+    method: "PUT", headers: {"Content-Type":"application/json", "Authorization": `Bearer ${token}`},
+    body: JSON.stringify({value}),
+  }).catch(()=>{});
+}
+
+// Pulls every synced key for the signed-in account and writes it straight
+// into local storage (bypassing store.set's own syncPush, which would just
+// echo it right back to the server). Keys the server doesn't have yet
+// (e.g. the very first login on a brand-new account) get the current local
+// value pushed up instead, so nothing already on this device is lost.
+// Returns the merged {key: value} map so the caller can also update any
+// React state that mirrors these keys.
+async function pullSync(token) {
+  const res = await api("/api/sync", {headers: {"Authorization": `Bearer ${token}`}});
+  const data = res.data || {};
+  const merged = {};
+  for (const key of SYNC_ALLOWED_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      mem[key] = data[key];
+      try { localStorage.setItem(key, JSON.stringify(data[key])); } catch {}
+      merged[key] = data[key];
+    } else {
+      const local = store.get(key, undefined);
+      if (local !== undefined) { syncPush(key, local); merged[key] = local; }
+    }
+  }
+  return merged;
+}
 
 // Closes the loop on the AI Decision: every scored call gets recorded here
 // (keyed by ticker, capped per ticker so this never grows unbounded), and
@@ -2116,6 +2166,44 @@ function Learn() {
   </>;
 }
 
+function AccountCard({state}) {
+  const {authEmail, authBusy, authErr, signup, login, logout} = state;
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  if (authEmail) {
+    return <div className="card">
+      <h2>Account</h2>
+      <p className="mut" style={{marginBottom:12}}>Signed in as <b style={{color:"var(--text)"}}>{authEmail}</b> — holdings, watchlist, cash, journal, activity, and your scan list sync to any device you sign into.</p>
+      <button className="btn ghost" onClick={logout}>Log out</button>
+    </div>;
+  }
+
+  const submit = () => {
+    const e = email.trim(), p = password;
+    if (!e || !p) return;
+    (mode==="signup" ? signup : login)(e, p);
+  };
+
+  return <div className="card">
+    <h2>Account</h2>
+    <p className="mut" style={{marginBottom:12}}>Sign in to sync your holdings, watchlist, cash, journal, activity, and scan list across devices. Without an account, everything stays on this device only.</p>
+    <div className="chips" style={{marginBottom:12}}>
+      {[["login","Log in"],["signup","Sign up"]].map(([k,l])=>
+        <div key={k} className={"chip"+(mode===k?" on":"")} onClick={()=>setMode(k)}>{l}</div>)}
+    </div>
+    <input placeholder="Email" value={email} style={{marginBottom:9}}
+      onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}/>
+    <input placeholder="Password" type="password" value={password} style={{marginBottom:9}}
+      onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}/>
+    {authErr && <p style={{color:"var(--red)",fontSize:12.5,marginBottom:9}}>{authErr}</p>}
+    <button className="btn" disabled={authBusy} onClick={submit}>
+      {authBusy ? "···" : (mode==="signup" ? "Create account" : "Log in")}
+    </button>
+  </div>;
+}
+
 /* ===== Settings ===== */
 function Settings({state}) {
   const {theme, setTheme} = state;
@@ -2129,6 +2217,7 @@ function Settings({state}) {
     <div style={{margin:"28px 0 20px"}}><h1>Settings</h1>
       <div className="tag" style={{marginTop:3}}>Defaults for this device</div></div>
 
+    <AccountCard state={state}/>
     <div className="card">
       <h2>Appearance</h2>
       <p className="mut" style={{marginBottom:12}}>Light and dark both use the same design system — pick one, or match your device automatically.</p>
@@ -2233,6 +2322,70 @@ function App() {
 
   const setScanTickersPersist = useCallback(list => {
     setScanTickers(list); store.set("ma_scan_tickers", list);
+  }, []);
+
+  const [authEmail, setAuthEmail] = useState(() => {
+    try { return localStorage.getItem(AUTH_EMAIL_KEY) || null; } catch { return null; }
+  });
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authErr, setAuthErr] = useState(null);
+
+  // Applies a freshly-pulled sync map onto the React state that mirrors
+  // each key (ma_ai_decisions and the Settings-local keys have no App-level
+  // state — pullSync already wrote those straight to localStorage).
+  const applySynced = useCallback(data => {
+    if ("ma_portfolio" in data) setHoldings(data.ma_portfolio);
+    if ("ma_watchlist" in data) setWatchlist(data.ma_watchlist);
+    if ("ma_cash" in data) setCash(data.ma_cash);
+    if ("ma_journal" in data) setJournal(data.ma_journal);
+    if ("ma_activity" in data) setActivity(data.ma_activity);
+    if ("ma_scan_tickers" in data) setScanTickers(data.ma_scan_tickers);
+  }, []);
+
+  // Already signed in from a previous visit — pull the latest synced state
+  // on load, since another device may have changed something since.
+  useEffect(() => {
+    const token = authToken();
+    if (!token) return;
+    pullSync(token).then(applySynced).catch(()=>{});
+  }, [applySynced]);
+
+  const signup = useCallback(async (email, password) => {
+    setAuthBusy(true); setAuthErr(null);
+    try {
+      const r = await api("/api/auth/signup", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({email, password})});
+      try { localStorage.setItem(AUTH_TOKEN_KEY, r.token); localStorage.setItem(AUTH_EMAIL_KEY, r.email); } catch {}
+      setAuthEmail(r.email);
+      const data = await pullSync(r.token);
+      applySynced(data);
+    } catch(e) { setAuthErr(e.message); } finally { setAuthBusy(false); }
+  }, [applySynced]);
+
+  const login = useCallback(async (email, password) => {
+    setAuthBusy(true); setAuthErr(null);
+    try {
+      const r = await api("/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({email, password})});
+      try { localStorage.setItem(AUTH_TOKEN_KEY, r.token); localStorage.setItem(AUTH_EMAIL_KEY, r.email); } catch {}
+      setAuthEmail(r.email);
+      const data = await pullSync(r.token);
+      applySynced(data);
+    } catch(e) { setAuthErr(e.message); } finally { setAuthBusy(false); }
+  }, [applySynced]);
+
+  const logout = useCallback(() => {
+    // Also clears the synced data keys, not just the token — otherwise a
+    // different account signed into afterward on this same device would
+    // have this account's leftover holdings/cash/journal/etc. pushed
+    // straight into ITS cloud data via pullSync's "server doesn't have
+    // this key yet, push the local value up" fallback.
+    try {
+      localStorage.removeItem(AUTH_TOKEN_KEY); localStorage.removeItem(AUTH_EMAIL_KEY);
+      for (const key of SYNC_ALLOWED_KEYS) localStorage.removeItem(key);
+    } catch {}
+    setAuthEmail(null); setAuthErr(null);
+    setHoldings([]); setWatchlist([]); setCash(0); setJournal([]); setActivity([]); setScanTickers([]);
   }, []);
 
   const analyze = useCallback(async (sym, opts={}) => {
@@ -2343,7 +2496,8 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme};
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme,
+    authEmail,authBusy,authErr,signup,login,logout};
 
   return <>
     <nav className="nav">
