@@ -17,7 +17,7 @@ RUN grep -v "^torch" requirements.txt > requirements-no-torch.txt \
 # CUDA build and is all that's needed to run FinBERT for inference.
 RUN pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
 
-COPY main.py .
+COPY main.py db.py auth.py .
 COPY web ./web
 
 ENV PORT=8000
