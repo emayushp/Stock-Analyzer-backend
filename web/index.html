@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta id="theme-color-light" name="theme-color" content="#F8FAFC" media="(prefers-color-scheme: light)">
-<meta id="theme-color-dark" name="theme-color" content="#0B1120" media="(prefers-color-scheme: dark)">
+<meta id="theme-color-light" name="theme-color" content="#F5EAD8" media="(prefers-color-scheme: light)">
+<meta id="theme-color-dark" name="theme-color" content="#211C16" media="(prefers-color-scheme: dark)">
 <title>Market Analyzer</title>
 <link rel="icon" href="/static/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -22,7 +22,7 @@
     var saved = localStorage.getItem("ma_theme");
     if (saved === "light" || saved === "dark") {
       document.documentElement.setAttribute("data-theme", saved);
-      var color = saved === "dark" ? "#0B1120" : "#F8FAFC";
+      var color = saved === "dark" ? "#211C16" : "#F5EAD8";
       document.getElementById("theme-color-light").setAttribute("content", color);
       document.getElementById("theme-color-dark").setAttribute("content", color);
     }
@@ -31,80 +31,80 @@
 </script>
 <style>
 /* ---------------------------------------------------------------------------
-   Elegant / clean theme: a refined navy-on-slate palette with a single
-   confident blue accent, real green/red for gains and losses (the
-   convention traders actually expect), soft rounded corners, and quiet
-   elevation instead of hard rules. Inter for UI text, JetBrains Mono for
-   anything numeric so figures line up in tidy columns.
+   Editorial warm theme: a cream-and-terracotta palette with olive green as
+   the second accent — terracotta doubles as both the primary/brand color
+   and the negative/SELL signal, olive green carries positive/BUY, and HOLD
+   stays a plain neutral tan. Very generous rounded corners, soft warm
+   shadows instead of hard rules. Caprasimo (a chunky display face) for
+   headings and big figures, Figtree for everything else.
 --------------------------------------------------------------------------- */
 :root{
-  --bg:#F8FAFC; --card:#FFFFFF; --cardAlt:#FFFFFF;
-  --border:#E2E8F0; --borderLit:#CBD5E1;
-  --text:#0F172A; --muted:#64748B; --faint:#94A3B8;
-  --accent:#2563EB; --accentDim:#1D4ED8; --accentBg:#EFF6FF;
-  --green:#16A34A; --greenBg:#F0FDF4; --greenText:#15803D;
-  --red:#DC2626; --redBg:#FEF2F2; --redText:#B91C1C;
-  --amber:#D97706; --amberBg:#FFFBEB; --amberText:#B45309;
-  --holdBg:#F1F5F9; --holdText:#475569;
-  --shadow-soft:0 1px 2px rgba(15,23,42,.05), 0 1px 1px rgba(15,23,42,.04);
-  --shadow-card:0 4px 16px rgba(15,23,42,.08), 0 1px 3px rgba(15,23,42,.06);
-  --shadow-pop:0 20px 48px rgba(15,23,42,.16), 0 4px 12px rgba(15,23,42,.08);
-  --r-lg:16px; --r-md:12px; --r-sm:8px;
-  --font-display:'Inter',system-ui,sans-serif; --font-sans:'Inter',system-ui,sans-serif;
-  --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --bg:#F5EAD8; --card:#EBDDC5; --cardAlt:#EBDDC5;
+  --border:color-mix(in srgb, #201E1D 16%, transparent); --borderLit:color-mix(in srgb, #201E1D 24%, transparent);
+  --text:#201E1D; --muted:color-mix(in srgb, #201E1D 55%, transparent); --faint:color-mix(in srgb, #201E1D 40%, transparent);
+  --accent:#C67139; --accentDim:#B2622D; --accentBg:#FFF2EB; --accentText:#643312;
+  --green:#56633F; --greenBg:#F0FAE1; --greenText:#3D472B;
+  --red:#C67139; --redBg:#FFF2EB; --redText:#8C491A;
+  --amber:#D67F48; --amberBg:#FFE1D0; --amberText:#643312;
+  --holdBg:#F9F4ED; --holdText:#474238;
+  --shadow-soft:0 1px 2px color-mix(in srgb, #2E2B25 14%, transparent);
+  --shadow-card:0 3px 10px color-mix(in srgb, #2E2B25 16%, transparent);
+  --shadow-pop:0 12px 32px color-mix(in srgb, #2E2B25 22%, transparent);
+  --r-lg:28px; --r-md:16px; --r-sm:8px;
+  --font-display:'Caprasimo',system-ui,sans-serif; --font-sans:'Figtree',system-ui,sans-serif;
+  --mono:'Figtree',system-ui,sans-serif;
 }
 @media(prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
-    --bg:#0B1120; --card:#131B2E; --cardAlt:#131B2E;
-    --border:rgba(148,163,184,.16); --borderLit:rgba(148,163,184,.28);
-    --text:#F1F5F9; --muted:#94A3B8; --faint:#64748B;
-    --accent:#60A5FA; --accentDim:#3B82F6; --accentBg:rgba(96,165,250,.14);
-    --green:#4ADE80; --greenBg:rgba(74,222,128,.12); --greenText:#86EFAC;
-    --red:#F87171; --redBg:rgba(248,113,113,.12); --redText:#FCA5A5;
-    --amber:#FBBF24; --amberBg:rgba(251,191,36,.12); --amberText:#FDE68A;
-    --holdBg:rgba(148,163,184,.14); --holdText:#CBD5E1;
-    --shadow-soft:0 1px 2px rgba(0,0,0,.4);
-    --shadow-card:0 8px 24px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.35);
-    --shadow-pop:0 24px 56px rgba(0,0,0,.55), 0 6px 16px rgba(0,0,0,.4);
+    --bg:#211C16; --card:#2C251D; --cardAlt:#2C251D;
+    --border:rgba(214,201,178,.16); --borderLit:rgba(214,201,178,.26);
+    --text:#F5EAD8; --muted:#B8AC97; --faint:#8C8171;
+    --accent:#E08A52; --accentDim:#C67139; --accentBg:rgba(224,138,82,.16); --accentText:#FFE1D0;
+    --green:#9CB37D; --greenBg:rgba(156,179,125,.14); --greenText:#C3D6A8;
+    --red:#E08A52; --redBg:rgba(224,138,82,.14); --redText:#F4C09D;
+    --amber:#F0A868; --amberBg:rgba(240,168,104,.16); --amberText:#FFDBB8;
+    --holdBg:rgba(184,172,151,.14); --holdText:#D8CDB8;
+    --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+    --shadow-card:0 4px 14px rgba(0,0,0,.5);
+    --shadow-pop:0 16px 40px rgba(0,0,0,.55);
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0B1120; --card:#131B2E; --cardAlt:#131B2E;
-  --border:rgba(148,163,184,.16); --borderLit:rgba(148,163,184,.28);
-  --text:#F1F5F9; --muted:#94A3B8; --faint:#64748B;
-  --accent:#60A5FA; --accentDim:#3B82F6; --accentBg:rgba(96,165,250,.14);
-  --green:#4ADE80; --greenBg:rgba(74,222,128,.12); --greenText:#86EFAC;
-  --red:#F87171; --redBg:rgba(248,113,113,.12); --redText:#FCA5A5;
-  --amber:#FBBF24; --amberBg:rgba(251,191,36,.12); --amberText:#FDE68A;
-  --holdBg:rgba(148,163,184,.14); --holdText:#CBD5E1;
-  --shadow-soft:0 1px 2px rgba(0,0,0,.4);
-  --shadow-card:0 8px 24px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.35);
-  --shadow-pop:0 24px 56px rgba(0,0,0,.55), 0 6px 16px rgba(0,0,0,.4);
+  --bg:#211C16; --card:#2C251D; --cardAlt:#2C251D;
+  --border:rgba(214,201,178,.16); --borderLit:rgba(214,201,178,.26);
+  --text:#F5EAD8; --muted:#B8AC97; --faint:#8C8171;
+  --accent:#E08A52; --accentDim:#C67139; --accentBg:rgba(224,138,82,.16); --accentText:#FFE1D0;
+  --green:#9CB37D; --greenBg:rgba(156,179,125,.14); --greenText:#C3D6A8;
+  --red:#E08A52; --redBg:rgba(224,138,82,.14); --redText:#F4C09D;
+  --amber:#F0A868; --amberBg:rgba(240,168,104,.16); --amberText:#FFDBB8;
+  --holdBg:rgba(184,172,151,.14); --holdText:#D8CDB8;
+  --shadow-soft:0 1px 2px rgba(0,0,0,.35);
+  --shadow-card:0 4px 14px rgba(0,0,0,.5);
+  --shadow-pop:0 16px 40px rgba(0,0,0,.55);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font:15px/1.6 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
+h1,h2,h3,h4,h5,h6{font-family:var(--font-display);font-weight:400}
 :focus{outline:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
 ::selection{background:color-mix(in srgb, var(--accent) 25%, transparent)}
-.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.num{font-family:var(--font-sans);font-variant-numeric:tabular-nums}
 .wrap{max-width:1320px;margin:0 auto;padding:32px 32px 72px}
-h1{font:700 30px/1.2 var(--font-display);letter-spacing:-.02em;margin:0 0 4px}
+h1{font:400 32px/1.15 var(--font-display);letter-spacing:-.01em;margin:0 0 4px}
 .tag{font-size:13px;color:var(--muted);font-weight:500}
 
 /* top navigation bar */
-.nav{display:flex;align-items:center;gap:26px;padding:14px 32px;border-bottom:1px solid var(--border);
+.nav{display:flex;align-items:center;gap:26px;padding:14px 32px;border-bottom:none;
   position:sticky;top:0;background:color-mix(in srgb, var(--bg) 92%, transparent);backdrop-filter:blur(10px);z-index:20}
-.nav-brand{font:700 18px/1 var(--font-display);letter-spacing:-.015em;margin-right:auto;white-space:nowrap;display:flex;align-items:center;gap:8px}
+.nav-brand{font:400 19px/1 var(--font-display);letter-spacing:-.01em;margin-right:auto;white-space:nowrap;display:flex;align-items:center;gap:8px}
 .nav-brand span{color:var(--accent)}
-.nav-tabs{display:flex;gap:22px;align-items:center;overflow-x:auto;scrollbar-width:none}
+.nav-tabs{display:flex;gap:6px;align-items:center;overflow-x:auto;scrollbar-width:none}
 .nav-tabs::-webkit-scrollbar{display:none}
 .nav-tabs button{position:relative;display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--muted);
-  font:500 13.5px/1 var(--font-sans);padding:6px 0 12px;cursor:pointer;white-space:nowrap;transition:color .15s}
-.nav-tabs button::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:2px;background:var(--accent);
-  transform:scaleX(0);transition:transform .2s ease}
-.nav-tabs button:hover{color:var(--text)}
-.nav-tabs button.on{color:var(--accent);font-weight:600}
-.nav-tabs button.on::after{transform:scaleX(1)}
+  font:600 13.5px/1 var(--font-sans);padding:9px 14px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.nav-tabs button:hover{color:var(--text);background:var(--holdBg)}
+.nav-tabs button.on{color:#fff;background:var(--accent)}
+.nav-tabs button.on:hover{background:var(--accent)}
 .nav-tabs button svg{width:15px;height:15px;flex-shrink:0}
 @media(max-width:880px){
   .nav{padding:12px 18px;gap:16px}
@@ -113,16 +113,16 @@ h1{font:700 30px/1.2 var(--font-display);letter-spacing:-.02em;margin:0 0 4px}
 
 /* search */
 .searchbar{display:flex;gap:9px;margin:22px 0 18px;position:relative}
-input,select,textarea{background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 14px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none;transition:border-color .12s,box-shadow .12s}
+input,select,textarea{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:11px 18px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none;transition:border-color .12s,box-shadow .12s}
 input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var(--accent);outline-offset:0;box-shadow:0 0 0 3px var(--accentBg)}
-.btn{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:var(--r-sm);padding:11px 20px;font:600 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:background .15s,transform .1s,box-shadow .15s;box-shadow:var(--shadow-soft)}
+.btn{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:999px;padding:11px 22px;font:700 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:background .15s,transform .1s,box-shadow .15s;box-shadow:var(--shadow-soft)}
 .btn:hover{background:var(--accentDim);box-shadow:var(--shadow-card)}
 .btn:active{background:var(--accentDim);transform:translateY(1px);box-shadow:var(--shadow-soft)}
 .btn:disabled{opacity:.45;cursor:default;box-shadow:none}
 .btn.ghost{background:var(--card);border:1px solid var(--border);color:var(--text);box-shadow:none}
 .btn.ghost:hover{background:var(--holdBg);border-color:var(--borderLit)}
 .btn.ghost:active{background:var(--border)}
-.btn.sm{padding:8px 14px;font-size:12.5px}
+.btn.sm{padding:8px 16px;font-size:12.5px}
 .sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;z-index:40;box-shadow:var(--shadow-pop)}
 .sugg div{padding:11px 15px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .sugg div:first-child{border-top:none}
@@ -133,13 +133,13 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var
 
 /* cards + grid */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px;align-items:start}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;margin-bottom:18px;box-shadow:var(--shadow-soft);transition:box-shadow .15s}
+.card{background:var(--card);border:1px solid transparent;border-radius:var(--r-lg);padding:22px;margin-bottom:18px;box-shadow:var(--shadow-soft);transition:box-shadow .15s}
 .card.alt{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow-card)}
-.card h2{font:600 15px/1.2 var(--font-display);letter-spacing:-.01em;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.card h2{font:400 19px/1.2 var(--font-display);letter-spacing:-.005em;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
 .lbl{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted)}
 .row{display:flex;justify-content:space-between;padding:8px 0;gap:12px;font-size:12.5px}
 .row span:first-child{color:var(--muted);font-weight:500}
-.row span:last-child{font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.row span:last-child{font-weight:700;font-family:var(--font-sans);font-variant-numeric:tabular-nums;text-align:right}
 .rule{height:1px;background:var(--border);margin:14px 0}
 .note{color:var(--muted);font-size:12px;line-height:1.6;margin-top:12px}
 .plain{font-size:13.5px;line-height:1.65}
@@ -147,21 +147,21 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var
 .mut{color:var(--muted);font-size:12.5px;line-height:1.6}
 
 /* stat-card strips */
-.hero{position:relative;background:var(--card);color:var(--text);padding:22px 24px;margin-bottom:18px;box-shadow:var(--shadow-card);border:1px solid var(--border);border-radius:var(--r-lg)}
-.hero.violet{border:1px solid var(--accent);box-shadow:var(--shadow-pop),0 0 0 1px var(--accentBg)}
+.hero{position:relative;background:var(--card);color:var(--text);padding:24px 26px;margin-bottom:18px;box-shadow:var(--shadow-card);border-radius:var(--r-lg)}
+.hero.violet{background:var(--greenBg);color:var(--text);box-shadow:none}
 .hero-body{position:relative;display:flex;flex-wrap:wrap;gap:24px}
 .hero-main{flex:1.4;min-width:220px}
 .hero-main .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:8px}
-.hero-main .v{font:700 36px/1 var(--font-display);letter-spacing:-.02em}
-.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:var(--holdBg);color:var(--text);padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:600;margin-top:10px}
+.hero-main .v{font:400 40px/1 var(--font-display);letter-spacing:-.01em}
+.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:var(--greenBg);color:var(--greenText);padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:700;margin-top:10px}
 .hero-side{min-width:120px;border-left:1px solid var(--border);padding-left:18px}
 .hero-side .k{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:5px}
-.hero-side .v{font:700 19px/1.2 var(--font-display)}
+.hero-side .v{font:400 21px/1.2 var(--font-display)}
 
 /* verdict/gauge — kept for backwards compat with any inline usage */
-.readout{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.readout{background:var(--card);border:1px solid transparent;border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
 .readout .top{display:flex;justify-content:space-between;align-items:flex-start}
-.verdict{font:700 36px/1 var(--font-display);letter-spacing:-.02em;margin-top:6px}
+.verdict{font:400 36px/1 var(--font-display);letter-spacing:-.01em;margin-top:6px}
 .meter{display:flex;align-items:flex-end;height:14px;gap:3px;justify-content:flex-end}
 .seg{width:5px;border-radius:2px;background:var(--border)}
 .grad{margin:16px 0 14px}
@@ -171,23 +171,23 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var
 .gradticks i:nth-child(4n+1){height:8px;background:var(--borderLit)}
 .stats3{display:flex;gap:16px}
 .stats3 div{flex:1}
-.stats3 b{display:block;font:600 15px var(--font-display);margin-top:4px}
+.stats3 b{display:block;font:400 17px var(--font-display);margin-top:4px}
 
 /* AI badge — marks anything Claude-generated */
 .ai-badge-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-.ai-badge{background:var(--accentBg);color:var(--accentDim);font:700 10px/1 var(--font-sans);letter-spacing:.4px;padding:4px 9px;border-radius:999px}
+.ai-badge{background:var(--accentBg);color:var(--accentText);font:700 10px/1 var(--font-sans);letter-spacing:.4px;padding:4px 9px;border-radius:999px}
 
 /* gauge (circular conviction score) */
 .gauge-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
 .gauge{position:relative;width:168px;height:168px}
 .gauge svg{width:100%;height:100%;transform:rotate(-90deg)}
 .gauge .num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.gauge .num b{font:700 42px/1 var(--font-display)}
+.gauge .num b{font:400 46px/1 var(--font-display)}
 .gauge .num span{font-size:11px;opacity:.75;margin-top:3px}
-.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:var(--holdBg);padding:7px 14px;border-radius:999px;font:600 13px/1 var(--font-sans)}
+.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:var(--card);padding:7px 14px;border-radius:999px;font:600 13px/1 var(--font-sans)}
 
 /* banners */
-.banner{background:var(--card);border:1px solid var(--border);border-left:3px solid;border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.banner{background:var(--card);border-left:4px solid;border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
 .banner p{font-size:12px;line-height:1.6;margin-top:6px}
 .pill{border:1px solid;border-radius:999px;padding:5px 13px;font:600 12px/1 var(--font-sans)}
 .mini{border:1px solid transparent;border-radius:999px;padding:4px 10px;font:700 10px/1 var(--font-sans);letter-spacing:.2px}
@@ -207,7 +207,7 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
 .prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-radius:var(--r-md);background:var(--bg);border:1px solid var(--border);padding:12px 14px;margin-bottom:10px}
+.hl{border-radius:var(--r-md);background:var(--bg);padding:12px 14px;margin-bottom:10px}
 .hl .t{font-size:13px;line-height:1.5;margin-top:5px}
 .hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.5}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
@@ -223,18 +223,18 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 }
 .center{text-align:center;padding:56px 20px;color:var(--muted)}
 .center h3{color:var(--text);font-size:16px;margin-bottom:7px;font-family:var(--font-display)}
-.err{background:var(--redBg);border:1px solid color-mix(in srgb, var(--red) 35%, transparent);border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px}
+.err{background:var(--redBg);border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px}
 .err b{color:var(--redText);display:block;margin-bottom:4px;font-size:14px}
 .exp{margin-top:12px}
 .expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:13px;margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--text)}
 .spin{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
-.big{font:700 32px/1 var(--font-display);letter-spacing:-.02em}
+.big{font:400 34px/1 var(--font-display);letter-spacing:-.01em}
 .chg{font:600 13.5px var(--font-sans);margin-top:6px}
 .split{display:flex;gap:16px;margin:10px 0}
 .split div{flex:1}
-.split b{display:block;font:600 19px var(--font-display);margin-top:4px}
-.modal{position:fixed;inset:0;background:rgba(15,23,42,.5);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.split b{display:block;font:400 21px var(--font-display);margin-top:4px}
+.modal{position:fixed;inset:0;background:rgba(46,43,37,.5);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
 .modal .box{background:var(--card);border-radius:var(--r-lg);padding:24px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-pop)}
 .opt{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:14px;margin-top:8px;cursor:pointer;transition:border-color .12s,background .12s}
 .opt:hover{border-color:var(--borderLit)}
@@ -243,8 +243,8 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 .opt span{color:var(--muted);font-size:11.5px}
 
 /* badges: BUY / SELL / HOLD, ticker avatars — used across screens. Real
-   green/red convention: gains and BUY read in green, losses and SELL in
-   red, HOLD stays neutral slate. */
+   green/red convention: gains and BUY read in olive green, losses and SELL
+   read in terracotta, HOLD stays a plain neutral tan. */
 .sig-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:999px;font:700 11px/1 var(--font-sans);letter-spacing:.02em}
 .sig-badge.buy{background:var(--greenBg);color:var(--greenText)}
 .sig-badge.sell{background:var(--redBg);color:var(--redText)}
@@ -1092,19 +1092,19 @@ function Analyze({state, dispatch}) {
                 return <div style={{display:"grid",gridTemplateColumns:`repeat(${cols},1fr)`,gap:10,marginBottom:14}}>
                   {decision.entry != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Entry</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.stop_loss != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16,color:"var(--red)"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16,color:"var(--red)"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.take_profit != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.risk_reward_ratio != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:16}}>{decision.risk_reward_ratio} : 1</div>
+                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.risk_reward_ratio} : 1</div>
                   </div>}
                 </div>;
               })()}
@@ -1270,7 +1270,7 @@ function HeldCard({h,d,pv}) {
 // Deterministic color per ticker so avatars stay visually distinct without a
 // hand-maintained per-symbol map — a refined set of hues that sit
 // comfortably alongside the accent blue rather than competing with it.
-const AVATAR_COLORS = ["#2563EB","#7C3AED","#0F766E","#DB2777","#B45309","#4F46E5","#0E7490","#047857"];
+const AVATAR_COLORS = ["#56633F","#474238","#8C491A","#402310","#3D472B","#643312"];
 function avatarColor(t) {
   let h = 0;
   for (let i = 0; i < (t||"").length; i++) h = (h*31 + t.charCodeAt(i)) | 0;
@@ -2063,7 +2063,7 @@ function ScreenerCard({c, dispatch}) {
       <div style={{display:"flex",alignItems:"center",gap:9}}><Avatar t={c.ticker}/><b className="num" style={{fontSize:14}}>{c.ticker}</b></div>
       <SigBadge sig={c.signal}/>
     </div>
-    <div style={{fontFamily:"var(--font-display)",fontWeight:800,fontSize:19}}>{c.price ?? "—"}</div>
+    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:19}}>{c.price ?? "—"}</div>
     {c.change_pct!=null && <div className="num" style={{fontSize:12,fontWeight:700,marginBottom:10,
       color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)} today</div>}
     <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5}}>
