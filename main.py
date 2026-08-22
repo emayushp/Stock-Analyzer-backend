@@ -237,6 +237,7 @@ class TechnicalAnalysis(BaseModel):
     volume_note: str
     divergence: Optional[str]
     divergence_note: str
+    divergence_bars_ago: Optional[int] = None
     signal: str
     conviction: str
     reasoning: str
@@ -711,6 +712,12 @@ def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
     except Exception as e:
         logger.warning(f"Divergence detection failed: {e}")
 
+    # Divergence is deliberately NOT folded into conviction here — this
+    # function has no idea yet whether the underlying data is even reliable
+    # enough to trust a divergence read on. analyze() applies it later
+    # (apply_divergence), at the same point as the other conviction checks,
+    # after data reliability has been decided — see the note there on why a
+    # Poor-reliability ticker skips this the same way it skips track record.
     return TechnicalAnalysis(
         rsi=round(rsi_val, 2) if rsi_val is not None else None,
         macd=round(macd_val, 4) if macd_val is not None else None,
@@ -720,6 +727,7 @@ def compute_technicals(hist: pd.DataFrame) -> TechnicalAnalysis:
         volume_note=describe_volume(volume_ratio),
         divergence=divergence_kind,
         divergence_note=describe_divergence(divergence_kind, bars_ago),
+        divergence_bars_ago=bars_ago,
         signal=signal,
         conviction=conviction,
         reasoning=reasoning,
@@ -822,6 +830,21 @@ _TRACK_RECORD_TTL_SECONDS = 86400  # 24h — backtest results don't meaningfully
 TRACK_RECORD_MIN_EVENTS = 8
 TRACK_RECORD_STRONG_EDGE = 1.0  # percentage points, net of trading costs
 
+CONVICTION_LEVELS = ["Low", "Moderate", "High"]
+
+
+def _nudge_conviction(conviction: str, steps: int) -> str:
+    """Move conviction up/down by `steps` notches, clamped to Low..High.
+    No-op for "Neutral" (HOLD's fixed conviction isn't on this ladder). The
+    one shared implementation of a rule several conviction modifiers in this
+    file need — track record, earnings proximity, and (below) quality,
+    regime, and divergence."""
+    if conviction not in CONVICTION_LEVELS:
+        return conviction
+    idx = CONVICTION_LEVELS.index(conviction)
+    idx = max(0, min(len(CONVICTION_LEVELS) - 1, idx + steps))
+    return CONVICTION_LEVELS[idx]
+
 
 def get_ticker_track_record(ticker: str) -> Optional["BacktestResponse"]:
     """
@@ -877,24 +900,27 @@ def _apply_track_record_inner(technical: TechnicalAnalysis, ticker: str) -> Tech
     edge = ten.net_edge
     technical.track_record_edge = edge
     technical.track_record_events = side.event_count
-    levels = ["Low", "Moderate", "High"]
 
     if edge >= TRACK_RECORD_STRONG_EDGE:
-        if technical.conviction in levels:
-            technical.conviction = levels[min(levels.index(technical.conviction) + 1, 2)]
+        before = technical.conviction
+        technical.conviction = _nudge_conviction(technical.conviction, 1)
+        raised = technical.conviction != before
         technical.track_record_note = (
             f"This stock's own {technical.signal} signals have beaten random days by "
             f"{edge:+.2f}% over the following two weeks, across {side.event_count} past "
-            "signals — a track record that supports this call. Conviction raised accordingly."
+            "signals — a track record that supports this call."
+            + (" Conviction raised accordingly." if raised else " Already at High conviction, so no further raise.")
         )
     elif edge <= -TRACK_RECORD_STRONG_EDGE:
-        if technical.conviction in levels:
-            technical.conviction = levels[max(levels.index(technical.conviction) - 1, 0)]
+        before = technical.conviction
+        technical.conviction = _nudge_conviction(technical.conviction, -1)
+        lowered = technical.conviction != before
         technical.track_record_note = (
             f"Worth knowing: this stock's own {technical.signal} signals have historically "
             f"UNDERPERFORMED random days by {abs(edge):.2f}% over the following two weeks, "
-            f"across {side.event_count} past signals. Conviction lowered accordingly — the "
-            "signal itself hasn't changed, but its track record here argues for caution."
+            f"across {side.event_count} past signals. The signal itself hasn't changed, but "
+            "its track record here argues for caution."
+            + (" Conviction lowered accordingly." if lowered else " Already at Low conviction.")
         )
     else:
         technical.track_record_note = (
@@ -929,15 +955,154 @@ def apply_earnings_proximity(
     if days_until < 0 or days_until > 7:
         return technical
 
-    downgrade = {"High": "Moderate", "Moderate": "Low", "Low": "Low", "Neutral": "Neutral"}
     when = "tomorrow" if days_until == 1 else "today" if days_until == 0 else f"in {days_until} days"
 
-    technical.conviction = downgrade.get(technical.conviction, technical.conviction)
-    technical.reasoning = (
-        technical.reasoning
-        + f" Note: earnings are due {when}, which typically overrides technical signals — "
-        "conviction lowered accordingly."
+    # Earnings being imminent is worth surfacing either way — even when
+    # conviction is already at the floor (or, for HOLD, never on the ladder
+    # to begin with) and the nudge below is a no-op, that's still something
+    # worth knowing about. Just don't claim a conviction change — or a prior
+    # adjustment — that didn't happen.
+    before = technical.conviction
+    technical.conviction = _nudge_conviction(technical.conviction, -1)
+    if technical.conviction != before:
+        technical.reasoning += (
+            f" Note: earnings are due {when}, which typically overrides technical signals — "
+            "conviction lowered accordingly."
+        )
+    elif before in CONVICTION_LEVELS:
+        technical.reasoning += (
+            f" Note: earnings are due {when}, which typically overrides technical signals — "
+            "already reflected in the conviction above."
+        )
+    else:
+        technical.reasoning += (
+            f" Note: earnings are due {when}, which typically overrides technical signals — "
+            "worth factoring in even though this is a HOLD."
+        )
+    return technical
+
+
+# ---------------------------------------------------------------------------
+# Three more conviction modifiers, added to close a real gap: quality score,
+# market regime, and RSI divergence were each already computed with their own
+# well-reasoned notes explaining exactly how they should affect a signal ("a
+# BUY on a Poor business deserves more scepticism", "treat BUY signals with
+# real caution" in a falling market, divergence as "one of the few genuinely
+# anticipatory technical patterns") — but none of that reasoning ever reached
+# technical.conviction. It only ever reached the optional, opt-in AI Decision
+# as passive JSON context. Since the mechanical signal (not the AI Decision)
+# is what actually drives Screener, Portfolio, and Brief for every user on
+# every ticker, that's where this evidence was going unused. These three
+# functions apply it, using the exact same nudge-one-notch pattern (and the
+# same shared _nudge_conviction helper, defined above) as
+# apply_track_record/apply_earnings_proximity — never touching signal
+# direction, and (except track record, which is symmetric by design) mostly
+# downgrade-only: the goal is tempering false confidence, not manufacturing
+# extra confidence a check hasn't earned.
+# ---------------------------------------------------------------------------
+
+
+def apply_divergence(technical: TechnicalAnalysis, bars_ago: Optional[int]) -> TechnicalAnalysis:
+    """
+    A divergence within the last 10 bars — bars_ago in 0..9, the same window
+    the app's own backtest "divergence_confirm" variant tests via
+    rolling(10) — either corroborates the current signal (bullish divergence
+    + BUY, bearish + SELL) or contradicts it (the move looks like it's
+    running out of steam right as the signal fires). HOLD is untouched, and
+    the reasoning sentence is only appended when the nudge actually moved
+    conviction — e.g. it's already a no-op at the High/Low ceiling/floor, and
+    silently claiming a change that didn't happen would be misleading.
+    """
+    if technical.signal not in ("BUY", "SELL") or not technical.divergence or bars_ago is None or bars_ago >= 10:
+        return technical
+    supports = (technical.signal == "BUY" and technical.divergence == "bullish") or (
+        technical.signal == "SELL" and technical.divergence == "bearish"
     )
+    before = technical.conviction
+    technical.conviction = _nudge_conviction(technical.conviction, 1 if supports else -1)
+    if technical.conviction != before:
+        technical.reasoning += (
+            f" {'Supported' if supports else 'Undercut'} by the recent {technical.divergence} "
+            "divergence — conviction adjusted accordingly."
+        )
+    return technical
+
+
+def apply_quality_check(technical: TechnicalAnalysis, quality: "QualityScore") -> TechnicalAnalysis:
+    """Skepticism toward a signal that fights the business's own fundamentals.
+    Doesn't touch HOLD, and never upgrades conviction — a Strong-quality BUY
+    doesn't get extra credit for being Strong, since the technicals already
+    speak for themselves; a Poor-quality BUY or a Strong-quality SELL does
+    get more scepticism, because those are the two combinations most likely
+    to be chasing noise (a technical bounce in a weak business) or panicking
+    (a short-term dip in a strong one)."""
+    if technical.signal not in ("BUY", "SELL") or quality.grade in ("Unknown", None):
+        return technical
+    penalize = (technical.signal == "BUY" and quality.grade == "Poor") or (
+        technical.signal == "SELL" and quality.grade == "Strong"
+    )
+    if not penalize:
+        return technical
+    before = technical.conviction
+    technical.conviction = _nudge_conviction(technical.conviction, -1)
+    if technical.conviction == before:
+        return technical
+    if technical.signal == "BUY":
+        technical.reasoning += (
+            " Business quality is Poor — conviction lowered; a technical bounce in a weak "
+            "business is a riskier bet than the same setup in a stronger one."
+        )
+    else:
+        technical.reasoning += (
+            " Business quality is Strong — conviction lowered; a short-term technical dip in "
+            "a strong business is less likely to be the start of a real decline."
+        )
+    return technical
+
+
+def apply_regime_check(technical: TechnicalAnalysis, regime: "MarketRegime") -> TechnicalAnalysis:
+    """
+    get_market_regime()'s own thresholds — not its label string — decide
+    this, so the two mostly stay in sync as regime wording evolves:
+    index_vs_200ma < -3 / > 3 is the same "Falling"/"Trending up" cutoff the
+    regime label itself is built from. Volatility is closer but not exact:
+    get_market_regime itself isn't perfectly symmetric at the boundary — its
+    "Trending up" branch treats volatility_percentile >= 70 as volatile,
+    while its "Falling" branch requires strictly > 70 — so a single cutoff
+    here can't match both exactly. >= 70 is used deliberately, since it's
+    the more conservative (inclusive) of the two and never misses a case
+    the regime label itself already calls "volatile". A counter-trend call
+    (BUY against a falling market, SELL against a rising one) or an
+    elevated-volatility regime (which produces more false signals in either
+    direction, per that function's own notes) each earn one downgrade —
+    combined into a single nudge rather than stacking, since both
+    conditions describe the same underlying "hostile regime," not two
+    independent penalties. Downgrade-only and HOLD-exempt, same asymmetry
+    as the quality check above.
+    """
+    if technical.signal not in ("BUY", "SELL"):
+        return technical
+    counter_trend = regime.index_vs_200ma is not None and (
+        (technical.signal == "BUY" and regime.index_vs_200ma < -3)
+        or (technical.signal == "SELL" and regime.index_vs_200ma > 3)
+    )
+    volatile = regime.volatility_percentile is not None and regime.volatility_percentile >= 70
+    if not (counter_trend or volatile):
+        return technical
+    before = technical.conviction
+    technical.conviction = _nudge_conviction(technical.conviction, -1)
+    if technical.conviction == before:
+        return technical
+    if counter_trend:
+        technical.reasoning += (
+            f" Market regime is '{regime.regime}' — {technical.signal} conviction lowered; "
+            "counter-trend calls fare worse against the broader market's own trend."
+        )
+    else:
+        technical.reasoning += (
+            f" Market regime is '{regime.regime}', with volatility elevated enough that "
+            "momentum signals produce more false positives — conviction lowered."
+        )
     return technical
 
 
@@ -1941,6 +2106,21 @@ def generate_ai_decision(
                 "sentiment, and the existing mechanical (ATR-based) price targets — no "
                 "information beyond what's in the JSON, and never invent facts, news, or "
                 "numbers not present there.\n\n"
+                "technical_signal.conviction is not a raw indicator reading — it has already "
+                "been nudged, one notch at a time, by signal_track_record, quality_score, "
+                "market_regime, divergence, and earnings timing: track_record and divergence "
+                "can raise OR lower it (agreement raises, conflict lowers), while quality, "
+                "regime, and earnings only ever lower it, whenever THOSE specific values are "
+                "the ones that triggered it — e.g. quality_score only pulled conviction down if "
+                "grade is Poor on a BUY or Strong on a SELL; market_regime only pulled it down "
+                "on a counter-trend call or elevated volatility; earnings only pulled it down "
+                "if a report lands within about a week. Use these fields to understand WHY "
+                "conviction is what it is, not as fresh, independent evidence to move your own "
+                "conviction_score down (or up) again for the same reason already covered above "
+                "— that would be counting it twice. Only let them shift conviction_score "
+                "further if you see something in their specific values that the mechanical "
+                "one-notch nudge wouldn't have captured (e.g. several of them pointing the same "
+                "way at once, or a severity the nudge logic can't express).\n\n"
                 "Only adjust entry/stop_loss/take_profit away from the mechanical baseline "
                 "when something in the context gives a specific, statable reason (earnings "
                 "gap risk, poor data reliability, a support/resistance level that makes the "
@@ -2068,18 +2248,27 @@ def analyze(ticker: str):
         if data_quality.reliability == "Poor":
             technical.conviction = "Low"
             technical.reasoning += " Conviction capped at Low: this listing trades too thinly for the indicators to be dependable."
-            # Skip track-record too: a backtest built on this same thin,
-            # unreliable data wouldn't be trustworthy either.
+            # Skip track-record and divergence too: both are read off this
+            # same thin, unreliable price data, so neither would be
+            # trustworthy either — and applying them after the cap above
+            # would just contradict it in the reasoning text.
         else:
             if data_quality.reliability == "Fair" and technical.conviction == "High":
                 technical.conviction = "Moderate"
             technical = apply_track_record(technical, ticker)
+            technical = apply_divergence(technical, technical.divergence_bars_ago)
     else:
         # Signal was substituted from a reliable underlying — that
-        # underlying's own track record is the relevant one to check.
+        # underlying's own track record (and this same divergence, read off
+        # the underlying's own reliable price data) are the relevant ones.
         technical = apply_track_record(technical, underlying["ticker"])
+        technical = apply_divergence(technical, technical.divergence_bars_ago)
+
+    technical = apply_quality_check(technical, quality)
 
     regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN", ".NE")))
+    technical = apply_regime_check(technical, regime)
+
     earnings = fetch_earnings(stock)
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
