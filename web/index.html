@@ -1405,7 +1405,7 @@ function Portfolio({state, dispatch}) {
   }) : [];
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+    <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
       <div style={{flex:1}}><h1>Portfolio</h1>
         <div className="tag" style={{marginTop:3}}>Your holdings · live P/L · signals</div></div>
       <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
@@ -1655,7 +1655,7 @@ function Brief({state, dispatch}) {
   </div>;
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+    <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
       <div style={{flex:1}}><h1>Morning Brief</h1>
         <div className="tag" style={{marginTop:3}}>Portfolio · watchlist · opportunities</div></div>
       <button className="btn sm ghost" onClick={()=>load(false)}>Refresh</button>
@@ -1967,7 +1967,7 @@ function Activity({state, dispatch}) {
   const closedTrades = buildActivityFeed(filtered).filter(a=>a.closedTrade);
 
   return <>
-    <div style={{display:"flex",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
+    <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
       <div style={{flex:1}}><h1>Activity</h1>
         <div className="tag" style={{marginTop:3}}>Closed trades · buy vs sell</div></div>
       <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={onImportFile}/>
