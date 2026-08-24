@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yfinance as yf
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -855,13 +855,82 @@ def get_ticker_track_record(ticker: str) -> Optional["BacktestResponse"]:
     track-record annotation until the cache is warm.
 
     The cache gets populated by the manual "Run backtest" button (which
-    shares this same cache) or by a prior analyze() call on this ticker
-    within the last 24h — never by this function blocking to compute it.
+    shares this same cache), or by a background task analyze() kicks off
+    after it has already returned its response (see _warm_track_record_cache
+    below) — never by this function blocking to compute it, and never on
+    analyze()'s own critical path.
     """
     cached = _TRACK_RECORD_CACHE.get(ticker)
     if cached and time.time() - cached[0] < _TRACK_RECORD_TTL_SECONDS:
         return cached[1]
     return None
+
+
+_TRACK_RECORD_IN_PROGRESS: set = set()
+
+
+def _get_or_run_backtest(
+    ticker: str, period: str = "2y", skip_if_in_progress: bool = False
+) -> Optional["BacktestResponse"]:
+    """
+    The one place that actually computes a backtest and (for period="2y")
+    writes it to _TRACK_RECORD_CACHE — shared by the manual "Run backtest"
+    endpoint and the background warm task below, so a change to the cache
+    contract only has to happen once.
+
+    `_TRACK_RECORD_IN_PROGRESS` guards against two near-simultaneous
+    background warms for the same not-yet-cached ticker (e.g. two users
+    opening it at once) both running the same expensive 2-year fetch and
+    backtest concurrently. It's opt-in via `skip_if_in_progress` — the
+    background warm sets it, since skipping there just means "the cache
+    will still get warm, slightly later." The manual endpoint leaves it
+    off: a user who clicked "Run backtest" needs a real result back, not a
+    silent None, even in the rare case a background warm for the same
+    ticker happens to be running at that exact moment — it still marks
+    itself in-progress meanwhile, so at least that direction (a concurrent
+    background warm skipping in favor of this one) is covered.
+
+    This is a plain set, not a lock — under CPython's GIL the check-then-add
+    below isn't perfectly atomic, so a very tight race could still let two
+    callers through, but that only costs one redundant backtest, not a
+    correctness problem, and a real lock would be more machinery than that
+    failure mode justifies.
+    """
+    ticker = ticker.strip().upper()
+    cached = _TRACK_RECORD_CACHE.get(ticker) if period == "2y" else None
+    if cached and time.time() - cached[0] < _TRACK_RECORD_TTL_SECONDS:
+        return cached[1]
+    if skip_if_in_progress and ticker in _TRACK_RECORD_IN_PROGRESS:
+        return None  # another caller is already computing this one
+    _TRACK_RECORD_IN_PROGRESS.add(ticker)
+    try:
+        result = run_backtest(ticker, period)
+        if period == "2y":
+            _TRACK_RECORD_CACHE[ticker] = (time.time(), result)
+        return result
+    finally:
+        _TRACK_RECORD_IN_PROGRESS.discard(ticker)
+
+
+def _warm_track_record_cache(ticker: str) -> None:
+    """
+    Runs as a FastAPI BackgroundTask, after analyze() has already sent its
+    response — so a slow or failed backtest here can never add latency to,
+    or break, the live signal a user is actually waiting on.
+
+    Without this, get_ticker_track_record() above is genuinely cache-only:
+    nothing else ever writes to _TRACK_RECORD_CACHE except the manual "Run
+    backtest" button, so apply_track_record() — the one conviction modifier
+    that's a stock's own measured history rather than a heuristic — would
+    silently never fire for a ticker nobody has happened to backtest by
+    hand in the last 24h. This closes that gap: the FIRST analyze() call
+    for a ticker still won't have a track record to show (there was nothing
+    to read yet), but every one after it within the cache's 24h window will.
+    """
+    try:
+        _get_or_run_backtest(ticker, "2y", skip_if_in_progress=True)
+    except Exception as e:
+        logger.info(f"Background track-record warm skipped for {ticker}: {e}")
 
 
 def apply_track_record(technical: TechnicalAnalysis, ticker: str) -> TechnicalAnalysis:
@@ -1372,6 +1441,45 @@ def analyze_sentiment(headlines: List[dict]) -> SentimentAnalysis:
 # Technicals only here — running FinBERT across 37 tickers' worth of headlines
 # would be far too slow and memory-hungry for a per-request call.
 # ---------------------------------------------------------------------------
+def _batch_reliability_cap(df: pd.DataFrame, conviction: str) -> Tuple[str, Optional[str]]:
+    """
+    A cheap proxy for assess_data_quality() — full reliability scoring needs
+    `info` (for the derivative/ETF check) and a staleness scan, neither of
+    which batch scoring can afford per-ticker across dozens of tickers in
+    one request. This uses only what's already in `df` from the same
+    yf.download() call: 60-day average volume. Deliberately more
+    conservative than §4's exact point thresholds, since it's the only
+    signal this path has — a thin name here gets capped without the
+    derivative/staleness checks that could otherwise offset it.
+
+    Returns (possibly-capped conviction, a short note if it was capped).
+    """
+    if conviction == "Neutral" or "Volume" not in df or len(df) < 20:
+        return conviction, None
+    try:
+        avg_vol = float(df["Volume"].tail(60).mean())
+    except Exception:
+        return conviction, None
+
+    # A present-but-empty/NaN Volume column (yfinance sometimes returns this
+    # for thin or derivative names) means "unknown," not "liquid" — treat it
+    # with the same suspicion assess_data_quality() gives unavailable volume,
+    # rather than silently leaving conviction uncapped because nan < 50_000
+    # is False.
+    if math.isnan(avg_vol):
+        if conviction != "Low":
+            return "Low", "Conviction capped: volume data unavailable, so liquidity can't be assessed."
+        return conviction, None
+
+    if avg_vol < 50_000:
+        if conviction != "Low":
+            return "Low", f"Conviction capped: ~{avg_vol:,.0f} shares/day is very thin trading."
+        return conviction, None
+    if avg_vol < 250_000 and conviction == "High":
+        return "Moderate", f"Conviction capped: ~{avg_vol:,.0f} shares/day is light trading."
+    return conviction, None
+
+
 def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """Shared technical-scoring logic for one ticker's OHLCV history, used by
     both the batched pass and the single-ticker retry below. Returns None
@@ -1399,6 +1507,9 @@ def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     volume_ratio = compute_volume_ratio(df)
 
     signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
+    conviction, cap_note = _batch_reliability_cap(df, conviction)
+    if cap_note:
+        reasoning += " " + cap_note
     if len(df) < 30:
         reasoning = f"Only {len(df)} trading day(s) available, likely a recently listed security. " + reasoning
 
@@ -2152,7 +2263,7 @@ def generate_ai_decision(
 
 
 @app.get("/api/analyze/{ticker}", response_model=AnalysisResponse)
-def analyze(ticker: str):
+def analyze(ticker: str, background_tasks: BackgroundTasks):
     ticker = ticker.strip().upper()
     if not ticker:
         raise HTTPException(status_code=400, detail="Ticker symbol is required.")
@@ -2298,6 +2409,16 @@ def analyze(ticker: str):
     )
 
     cache_set(ticker, response.model_dump())
+
+    # Warm the track-record cache for whichever ticker apply_track_record
+    # actually used above (see the same underlying-substitution / Poor-
+    # reliability skip logic a few lines up) — never blocks this response,
+    # only helps the NEXT analyze() call on this ticker within 24h. See
+    # _warm_track_record_cache for why this exists.
+    if underlying_hist is not None or data_quality.reliability != "Poor":
+        track_record_ticker = underlying["ticker"] if underlying_hist is not None else ticker
+        background_tasks.add_task(_warm_track_record_cache, track_record_ticker)
+
     return response
 
 
@@ -2892,20 +3013,12 @@ def backtest(ticker: str, period: str = "2y"):
     """
     if period not in ("1y", "2y", "5y"):
         period = "2y"
-    ticker_clean = ticker.strip().upper()
 
-    # Shares a cache with the live signal's track-record check (same period,
-    # same computation) — if this ticker was just analyzed, this is instant
-    # instead of redundantly refetching and recomputing the same backtest.
-    if period == "2y":
-        cached = _TRACK_RECORD_CACHE.get(ticker_clean)
-        if cached and time.time() - cached[0] < _TRACK_RECORD_TTL_SECONDS:
-            return cached[1]
-
-    result = run_backtest(ticker, period)
-    if period == "2y":
-        _TRACK_RECORD_CACHE[ticker_clean] = (time.time(), result)
-    return result
+    # Shares a cache (and, via _get_or_run_backtest, an in-progress guard)
+    # with the live signal's track-record check — if this ticker was just
+    # analyzed, or is being warmed in the background right now, this reuses
+    # that work instead of redundantly refetching and recomputing.
+    return _get_or_run_backtest(ticker, period)
 
 
 # ===========================================================================

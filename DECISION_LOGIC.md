@@ -19,7 +19,7 @@ flowchart TD
     A["Fetch price history + company info"] --> B["Compute RSI(14) / MACD(12,26,9) / volume ratio(20d)<br/><i>divergence scanned in parallel, applied later at §8</i>"]
     B --> C["Score → BUY / SELL / HOLD"]
     C --> D["Volume ratio → initial conviction<br/>(High / Moderate / Low, HOLD = Neutral)"]
-    D -.-> Z["Screener · Portfolio list · Brief · Digest<br/><b>stop here</b> — §4–§11 not applied"]
+    D -.-> Z["Screener · Portfolio list · Brief · Digest<br/><b>stop here</b> — §4–§11 not applied<br/>(volume-only cap applies, see §13)"]
     D --> E["Assess data quality → Good / Fair / Poor"]
     E --> F{"Hedged/CDR with a liquid<br/>underlying resolved?"}
     F -- yes --> F2["Recompute steps above on<br/>the underlying's own price history"] --> G
@@ -134,7 +134,14 @@ directly.
 
 - **Source** — a cached 2-year, event-anchored backtest (10-day holding
   horizon, net of trading costs), refreshed at most every 24h. Never
-  computed inline — if nothing is cached yet, this step is a silent no-op.
+  computed inline on the request's own critical path — if nothing is
+  cached yet, this step is a silent no-op for *that* request. `analyze()`
+  schedules a FastAPI background task (`_warm_track_record_cache`) after
+  it returns its response, so the *next* look at that ticker within 24h
+  will usually have a track record to show, without ever adding latency to
+  the request that triggered the warm. A shared in-progress guard
+  (`_get_or_run_backtest`) keeps two near-simultaneous requests for the
+  same not-yet-cached ticker from both running the same 2-year backtest.
 - **Minimum sample** — 8 past signal events of the same side on this ticker.
 - **Strong edge** — ±1.0 percentage point vs. a random-day baseline.
 
@@ -202,8 +209,17 @@ price targets (§12) run **only** on `/api/analyze/{ticker}`.
 | Surface | What it shows |
 |---|---|
 | Analyze (single ticker) | Full pipeline — §1–§12, plus §15 on request. |
-| Screener, Morning Brief, Portfolio's holdings list, Digest | §1–§2 only: raw signal + volume-based conviction. No reliability gate, no track record/divergence/quality/regime/earnings modifiers, no price targets. |
+| Screener, Morning Brief, Portfolio's holdings list, Digest | §1–§2, plus a lightweight volume-only reliability cap (`_batch_reliability_cap`) — see below. No track record/divergence/quality/regime/earnings modifiers, no price targets. |
 | Portfolio → a single holding's "AI Decision" | Drills into the full pipeline for that one ticker, same as Analyze. |
+
+**The batch cap, specifically:** using only the 60-day average volume
+already present in the same batched `yf.download()` call (no `info`, so no
+derivative/ETF check; no staleness scan) — average volume unavailable, all-NaN,
+or under 50,000 shares/day caps conviction to Low; 50,000–250,000 caps a
+High down to Moderate. This is deliberately narrower than §4's full scoring
+and does not replace it: a thin-but-not-derivative name gets *some* floor in
+list views now, but the derivative and staleness checks §4 does on Analyze
+still only run there.
 
 The reason is cost, not disagreement about correctness: scoring dozens of
 screener tickers in one batched request has to stay light, while
@@ -283,12 +299,14 @@ base rule at that correction threshold. The formula in §1 has therefore
 been left unchanged rather than revised on intuition alone; that same
 harness is the right tool to re-run before any future change to it.
 
-**The batch path (§13) has no reliability floor.** Because
-Screener/Portfolio-list/Brief/Digest skip §4–§6 entirely, a thinly-traded or
-derivative ticker can show a "High" conviction signal in a list view built
-only from a noisy volume ratio — a read that the same ticker, opened
-individually, would likely have capped to Low. This is a real, current gap
-between the two paths, not a hidden one.
+**The batch path (§13) has only a partial reliability floor.**
+Screener/Portfolio-list/Brief/Digest skip §4–§6 entirely, but now apply a
+lightweight volume-only cap (see §13) using data already in hand. A
+derivative/ETF wrapper or a stale/gappy-but-not-thin name, though, still
+gets no floor at all in list views — only §4's `info`-based derivative
+check and staleness scan can catch those, and both are Analyze-only. A
+"High" conviction shown in a list view is therefore still a narrower read
+than the same ticker opened individually, just less narrow than before.
 
 ---
 
