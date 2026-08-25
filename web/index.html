@@ -983,7 +983,7 @@ function EarningsTrack({quarters}) {
 
 /* ===== Analyze ===== */
 function Analyze({state, dispatch}) {
-  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading,requestDecision} = state;
+  const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading,verdictError,requestDecision} = state;
   const [sugg,setSugg] = useState([]), [focus,setFocus] = useState(false);
   const held = data ? holdings.find(h=>h.ticker===data.ticker) : null;
   const decision = data && data.ai_decision && data.ai_decision.conviction_score != null ? data.ai_decision : null;
@@ -1052,12 +1052,15 @@ function Analyze({state, dispatch}) {
         <Chart ticker={data.ticker} currency={data.currency}/>
       </div>
 
-      {!decision && !verdictLoading && <div className="card alt" style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-        <div style={{flex:1,minWidth:180}}>
-          <div className="ai-badge-row" style={{marginBottom:6}}><span className="ai-badge">AI</span></div>
-          <p className="mut">Conviction score, entry/stop/target — one on-demand request, not fetched automatically.</p>
+      {!decision && !verdictLoading && <div className="card alt">
+        <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:180}}>
+            <div className="ai-badge-row" style={{marginBottom:6}}><span className="ai-badge">AI</span></div>
+            <p className="mut">Conviction score, entry/stop/target — one on-demand request, not fetched automatically.</p>
+          </div>
+          <button className="btn" onClick={requestDecision}>{verdictError ? "Try again" : "Get AI Decision"}</button>
         </div>
-        <button className="btn" onClick={requestDecision}>Get AI Decision</button>
+        {verdictError && <p className="mut" style={{marginTop:10,color:"var(--red)"}}>{verdictError}</p>}
       </div>}
       {verdictLoading && !decision && <div className="card alt">
         <div style={{display:"flex",alignItems:"center",gap:9}}>
@@ -1294,6 +1297,7 @@ function Portfolio({state, dispatch}) {
   const [importMsg,setImportMsg] = useState(null);
   const [decisions,setDecisions] = useState({});
   const [decisionBusy,setDecisionBusy] = useState({});
+  const [decisionErrors,setDecisionErrors] = useState({});
 
   // /api/analyze/{ticker}/decision reuses /api/analyze's own cache rather
   // than refetching — Portfolio's own pricing call (batch_score, above)
@@ -1304,6 +1308,7 @@ function Portfolio({state, dispatch}) {
     const hKey = `${h.ticker}__${h.account||""}`;
     if (decisionBusy[hKey]) return;
     setDecisionBusy(prev=>({...prev,[hKey]:true}));
+    setDecisionErrors(prev=>({...prev,[hKey]:null}));
     try {
       const a = await api(`/api/analyze/${encodeURIComponent(h.ticker)}`);
       const body = {shares:h.shares, cost_basis:h.cost_basis, history: resolvedHistoryFor(h.ticker, a.current_price)};
@@ -1313,8 +1318,12 @@ function Portfolio({state, dispatch}) {
       if (v.conviction_score != null) {
         setDecisions(prev=>({...prev,[hKey]:v}));
         recordDecision(h.ticker, a.current_price, v);
+      } else {
+        setDecisionErrors(prev=>({...prev,[hKey]:"Didn't come back — this can happen if the request timed out. Try again."}));
       }
-    } catch {}
+    } catch (e) {
+      setDecisionErrors(prev=>({...prev,[hKey]:e.message || "Something went wrong. Try again."}));
+    }
     finally { setDecisionBusy(prev=>({...prev,[hKey]:false})); }
   },[decisionBusy]);
 
@@ -1530,10 +1539,13 @@ function Portfolio({state, dispatch}) {
               <Row l="RSI (14)" v={h.rsi}/>
               <p className="note">{h.context}</p>
               <div style={{marginTop:10}}>
-                {!decisions[hKey] && !decisionBusy[hKey] && <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                  <span className="ai-badge">AI</span>
-                  <span className="mut" style={{fontSize:11.5,flex:1,minWidth:140}}>Is this still worth holding at your cost basis?</span>
-                  <button className="btn ghost" style={{padding:"7px 14px",fontSize:12.5}} onClick={()=>getDecision(h)}>Get AI Decision</button>
+                {!decisions[hKey] && !decisionBusy[hKey] && <div>
+                  <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <span className="ai-badge">AI</span>
+                    <span className="mut" style={{fontSize:11.5,flex:1,minWidth:140}}>Is this still worth holding at your cost basis?</span>
+                    <button className="btn ghost" style={{padding:"7px 14px",fontSize:12.5}} onClick={()=>getDecision(h)}>{decisionErrors[hKey] ? "Try again" : "Get AI Decision"}</button>
+                  </div>
+                  {decisionErrors[hKey] && <p className="mut" style={{marginTop:6,fontSize:11.5,color:"var(--red)"}}>{decisionErrors[hKey]}</p>}
                 </div>}
                 {decisionBusy[hKey] && <div style={{display:"flex",alignItems:"center",gap:9}}>
                   <span className="ai-badge">AI</span><span className="mut">Scoring the setup…</span>
@@ -2323,6 +2335,7 @@ function App() {
   const [q,setQ] = useState("");
   const [data,setData] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
   const [verdictLoading,setVerdictLoading] = useState(false);
+  const [verdictError,setVerdictError] = useState(null);
   const verdictTickerRef = useRef(null);
   const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
   const [scanTickers,setScanTickers] = useState(()=>store.get("ma_scan_tickers",[]));
@@ -2425,7 +2438,7 @@ function App() {
   const analyze = useCallback(async (sym, opts={}) => {
     const s = (sym||"").trim().toUpperCase();
     if (!s) return;
-    setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null); setVerdictLoading(false);
+    setQ(s); setTab("analyze"); setBusy(true); setErr(null); setData(null); setVerdictLoading(false); setVerdictError(null);
     // Pushes a real history entry so the mouse/browser back button steps
     // back through in-app navigation instead of leaving the site — see the
     // popstate listener below. skipHistory is set only when this call is
@@ -2483,6 +2496,7 @@ function App() {
     const s = data?.ticker;
     if (!s || verdictLoading) return;
     setVerdictLoading(true);
+    setVerdictError(null);
     verdictTickerRef.current = s;
     try {
       const held = holdings.find(h=>h.ticker===s);
@@ -2493,9 +2507,20 @@ function App() {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body),
       });
-      setData(prev => (prev && prev.ticker===s) ? {...prev, ai_decision:v} : prev);
-      recordDecision(s, data.current_price, v);
-    } catch {}
+      // A request can "succeed" (200) with no real decision inside — the
+      // backend swallows AI-call failures (timeout, no API key, model
+      // error) internally and returns an all-null response rather than an
+      // HTTP error, so a thrown exception below isn't the only failure
+      // path to handle.
+      if (v.conviction_score == null) {
+        if (verdictTickerRef.current===s) setVerdictError("The AI Decision didn't come back — this can happen if the request timed out. Try again in a moment.");
+      } else {
+        setData(prev => (prev && prev.ticker===s) ? {...prev, ai_decision:v} : prev);
+        recordDecision(s, data.current_price, v);
+      }
+    } catch (e) {
+      if (verdictTickerRef.current===s) setVerdictError(e.message || "Something went wrong requesting the AI Decision. Try again.");
+    }
     finally { if (verdictTickerRef.current===s) setVerdictLoading(false); }
   },[data, verdictLoading, holdings]);
 
@@ -2530,7 +2555,7 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,requestDecision,theme,setTheme,
+    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,verdictError,requestDecision,theme,setTheme,
     authEmail,authBusy,authErr,signup,login,logout};
 
   return <>

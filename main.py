@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -912,6 +913,20 @@ def _get_or_run_backtest(
         _TRACK_RECORD_IN_PROGRESS.discard(ticker)
 
 
+# Caps how many of these can run at once. Each one fetches 2 years of price
+# history over the network and runs a full backtest — real CPU and I/O, not
+# free. Without a cap, a burst of analyze() calls (e.g. a Portfolio with
+# many holdings, or several tabs open at once) could queue up enough of
+# these to start competing with foreground requests for the same limited
+# worker threads — including, worst case, an AI Decision request that
+# arrives right after, since /decision always follows an analyze() call for
+# the same ticker. A non-blocking acquire means a warm that can't get a
+# slot is simply skipped rather than queued: that ticker just stays cold
+# until a later analyze() call tries again, which is a fine trade-off for
+# something that was already fully optional.
+_TRACK_RECORD_WARM_SEMAPHORE = threading.Semaphore(2)
+
+
 def _warm_track_record_cache(ticker: str) -> None:
     """
     Runs as a FastAPI BackgroundTask, after analyze() has already sent its
@@ -927,10 +942,15 @@ def _warm_track_record_cache(ticker: str) -> None:
     for a ticker still won't have a track record to show (there was nothing
     to read yet), but every one after it within the cache's 24h window will.
     """
+    if not _TRACK_RECORD_WARM_SEMAPHORE.acquire(blocking=False):
+        logger.info(f"Background track-record warm skipped for {ticker}: too many warms already in flight")
+        return
     try:
         _get_or_run_backtest(ticker, "2y", skip_if_in_progress=True)
     except Exception as e:
         logger.info(f"Background track-record warm skipped for {ticker}: {e}")
+    finally:
+        _TRACK_RECORD_WARM_SEMAPHORE.release()
 
 
 def apply_track_record(technical: TechnicalAnalysis, ticker: str) -> TechnicalAnalysis:
