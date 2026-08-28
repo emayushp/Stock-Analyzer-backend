@@ -551,6 +551,11 @@ class EarningsCalendarResponse(BaseModel):
     note: str
 
 
+class SectorRotationResponse(BaseModel):
+    sectors: List[SectorIntelligence]
+    note: str
+
+
 class HighVolumeResponse(BaseModel):
     stocks: List[ScreenerHit]
     universe_note: str
@@ -1916,6 +1921,51 @@ def map_sector_intelligence(payload: Any, sector_name: Optional[str]) -> Optiona
         avg_perf_1m_pct=stats.get("avg_perf_1m_pct"),
         sma200_breadth_pct=stats.get("sma200_breadth_pct"),
     )
+
+
+# Stocklake's fixed 11-sector (GICS-style) taxonomy — the same list
+# _STOCKLAKE_SECTOR_MAP's docstring above references. Used to scan every
+# sector at once for the rotation dashboard (Stocklake-first plan, P5b),
+# rather than the single sector a ticker's own ANalyze page happens to ask for.
+STOCKLAKE_SECTORS = [
+    "Technology", "Healthcare", "Financials", "Consumer Discretionary",
+    "Consumer Staples", "Energy", "Industrials", "Materials",
+    "Utilities", "Real Estate", "Communication Services",
+]
+
+_SECTOR_ROTATION_CACHE: Tuple[float, Optional[List[dict]]] = (0.0, None)
+_SECTOR_ROTATION_TTL_SECONDS = 3600  # matches sector intelligence's own ~4h refresh cadence loosely
+
+
+def fetch_sector_rotation() -> List[SectorIntelligence]:
+    """
+    All 11 sectors' current cycle stage/rotation signal in one shared MCP
+    session (same reasoning as _stocklake_batch_stocks: one handshake for
+    11 sequential get_sector_intelligence calls, not 11 separate ones).
+    Cached for an hour — this is a dedicated dashboard page, not a hot
+    path like Screener/Brief, so a plain request-time cache (rather than
+    the full proactive background-refresh loop those get) is proportionate.
+    """
+    global _SECTOR_ROTATION_CACHE
+    cached_at, cached_data = _SECTOR_ROTATION_CACHE
+    if cached_data is not None and time.time() - cached_at < _SECTOR_ROTATION_TTL_SECONDS:
+        return [SectorIntelligence(**s) for s in cached_data]
+
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        return []
+
+    want = {sector: ("get_sector_intelligence", {"sector": sector}) for sector in STOCKLAKE_SECTORS}
+    context = fetch_stocklake_context("__sector_rotation__", want)
+
+    sectors: List[SectorIntelligence] = []
+    for sector in STOCKLAKE_SECTORS:
+        mapped = map_sector_intelligence(context.get(sector), sector)
+        if mapped is not None:
+            sectors.append(mapped)
+
+    if sectors:
+        _SECTOR_ROTATION_CACHE = (time.time(), [s.model_dump() for s in sectors])
+    return sectors
 
 
 # ---------------------------------------------------------------------------
@@ -3436,6 +3486,30 @@ def earnings_calendar(request: EarningsCalendarRequest):
             "Upcoming earnings dates via Stocklake, checked against the tickers you "
             "hold or watch. Suffix-stripped Canadian tickers and anything outside "
             "Stocklake's ~3,500-symbol universe can't be checked this way."
+        ),
+    )
+
+
+@app.get("/api/sector-rotation", response_model=SectorRotationResponse)
+def sector_rotation():
+    """
+    All 11 sectors' cycle stage and rotation signal side by side (Stocklake-
+    first plan, P5b) — the same get_sector_intelligence data the Analyze
+    page's sector card already shows for one ticker's sector, scanned
+    across every sector at once so money moving between sectors is visible
+    without having to check ticker by ticker.
+    """
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        raise HTTPException(status_code=503, detail="Stocklake isn't configured for this deployment.")
+    sectors = fetch_sector_rotation()
+    if not sectors:
+        raise HTTPException(status_code=502, detail="Couldn't reach Stocklake's sector intelligence right now.")
+    return SectorRotationResponse(
+        sectors=sectors,
+        note=(
+            "All 11 sectors' current cycle stage and rotation signal via Stocklake, "
+            "refreshed roughly every hour. Informational only — not backtestable "
+            "(no historical time series available) and not factored into any signal."
         ),
     )
 
