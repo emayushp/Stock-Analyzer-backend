@@ -556,6 +556,20 @@ class SectorRotationResponse(BaseModel):
     note: str
 
 
+class UnusualActivityHit(BaseModel):
+    ticker: str
+    activity: InsiderActivity
+
+
+class UnusualActivityRequest(BaseModel):
+    tickers: List[str]
+
+
+class UnusualActivityResponse(BaseModel):
+    hits: List[UnusualActivityHit]
+    note: str
+
+
 class HighVolumeResponse(BaseModel):
     stocks: List[ScreenerHit]
     universe_note: str
@@ -3512,6 +3526,79 @@ def sector_rotation():
             "(no historical time series available) and not factored into any signal."
         ),
     )
+
+
+# get_insider_activity is looked up one symbol at a time (unlike get_stocks,
+# which batches), so scanning N tickers costs N sequential calls in the
+# shared session — capped here to keep that session's timeout budget
+# (STOCKLAKE_TIMEOUT_SECONDS * call count, see fetch_stocklake_context)
+# reasonable and to bound how much of the daily per-symbol quota one
+# request can spend.
+UNUSUAL_ACTIVITY_MAX_TICKERS = 20
+
+
+@app.post("/api/unusual-activity", response_model=UnusualActivityResponse)
+def unusual_activity(request: UnusualActivityRequest):
+    """
+    Insider/institutional activity across a list of tickers (Stocklake-
+    first plan, P5d) — the frontend passes holdings + watchlist, same as
+    the earnings calendar. Reuses map_insider_activity() unchanged (already
+    verified against live get_insider_activity data earlier this session
+    for the per-ticker Analyze page card); the only new logic is the fan-out
+    across tickers.
+
+    Deliberately scoped to a person's own tickers rather than the full
+    fixed universe (hundreds of names): get_insider_activity is a
+    one-symbol-per-call tool, not a batch one like get_stocks, so scanning
+    the whole universe here would mean hundreds of sequential Stocklake
+    calls in a single request — a very different cost profile than the
+    fixed-universe screener (which the background refresh loop can afford
+    to do slowly, off the request path; this endpoint can't).
+
+    symbol_validated=True is safe to pass unconditionally here (unlike
+    analyze()'s per-ticker call): only direct, non-suffix-stripped tickers
+    are looked up at all (the same restriction stocklake_batch_score()
+    applies), and the wrong-company substitution risk that flag guards
+    against is specific to suffix-stripped Canadian lookups.
+    """
+    tickers = [t.strip().upper() for t in request.tickers if t and t.strip()]
+    direct_tickers = [t for t in tickers if _stocklake_symbol(t) == t]
+    truncated = len(direct_tickers) > UNUSUAL_ACTIVITY_MAX_TICKERS
+    direct_tickers = direct_tickers[:UNUSUAL_ACTIVITY_MAX_TICKERS]
+
+    if not direct_tickers:
+        return UnusualActivityResponse(hits=[], note="No tickers to check.")
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        raise HTTPException(status_code=503, detail="Stocklake isn't configured for this deployment.")
+
+    want = {t: ("get_insider_activity", {"symbol": t}) for t in direct_tickers}
+    context = fetch_stocklake_context("__unusual_activity__", want)
+
+    hits: List[UnusualActivityHit] = []
+    for ticker in direct_tickers:
+        activity = map_insider_activity(context.get(ticker), symbol_validated=True)
+        if activity is None:
+            continue
+        # "Unusual" means there's actually something to look at — skip
+        # tickers Stocklake covers but with no recent buys, sells, or a
+        # non-neutral signal, rather than padding the feed with rows that
+        # say nothing happened.
+        if not activity.insider_buys and not activity.insider_sells and (activity.signal or "").lower() == "neutral":
+            continue
+        hits.append(UnusualActivityHit(ticker=ticker, activity=activity))
+
+    hits.sort(key=lambda h: abs(h.activity.signal_score or 0), reverse=True)
+
+    note = (
+        "Insider transactions and institutional flow via Stocklake, checked against "
+        "the tickers you hold or watch — not the whole market. Suffix-stripped "
+        "Canadian tickers and anything outside Stocklake's ~3,500-symbol universe "
+        "can't be checked this way."
+    )
+    if truncated:
+        note += f" Checked the first {UNUSUAL_ACTIVITY_MAX_TICKERS} eligible tickers only."
+
+    return UnusualActivityResponse(hits=hits, note=note)
 
 
 HISTORY_RANGES = {
