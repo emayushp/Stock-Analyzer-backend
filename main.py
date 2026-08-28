@@ -613,6 +613,29 @@ def detect_market(ticker: str) -> str:
     return "US"
 
 
+def _yf_history_with_timeout(stock, period: str, timeout: Optional[float] = None):
+    """
+    Bounds one yf.Ticker(...).history() call to `timeout` seconds (defaults
+    to the same BATCH_DOWNLOAD_TIMEOUT_SECONDS batch_score() uses — resolved
+    at call time, not as a default-argument value, since that constant is
+    defined later in this file than this function). Same reasoning as
+    batch_score()'s guard (deliberately not a `with ThreadPoolExecutor(...)
+    as pool:` block — that waits for the call to finish on exit even after
+    .result() has already timed out): the single-ticker /api/analyze path
+    had no timeout at all before this, unlike the batch path, which is
+    exactly the gap the Stocklake-first plan's P1 flagged for this endpoint.
+    """
+    if timeout is None:
+        timeout = BATCH_DOWNLOAD_TIMEOUT_SECONDS
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(
+            stock.history, period=period, interval="1d", auto_adjust=True
+        ).result(timeout=timeout)
+    finally:
+        pool.shutdown(wait=False)
+
+
 def fetch_price_history(ticker: str):
     """6 months of daily bars — enough for a 26/9 MACD, 14-day RSI and 20-day volume avg.
 
@@ -621,12 +644,21 @@ def fetch_price_history(ticker: str):
     return a sparse/empty 6-month window from Yahoo even though a longer window
     has plenty of history. Same retry already proven in batch_score()'s own
     fallback path, applied here so the single-ticker /api/analyze endpoint gets
-    the same fix, not just the portfolio/screener batch path."""
+    the same fix, not just the portfolio/screener batch path.
+
+    NOTE (Stocklake-first plan, P1): this is still yfinance-only — swapping it
+    for Stocklake's get_stock_history needs that tool's real response schema
+    verified against a live call first (this session's Stocklake MCP
+    connector was down while this was written), so it's deliberately not
+    guessed at here. What ships now is the reliability half: a call that used
+    to be able to hang indefinitely is bounded, same as every yfinance call
+    batch_score() makes.
+    """
     stock = yf.Ticker(ticker)
-    hist = stock.history(period="6mo", interval="1d", auto_adjust=True)
+    hist = _yf_history_with_timeout(stock, "6mo")
     if hist is None or hist.empty or len(hist) < 30:
         current_len = 0 if hist is None else len(hist)
-        longer = stock.history(period="2y", interval="1d", auto_adjust=True)
+        longer = _yf_history_with_timeout(stock, "2y")
         if longer is not None and not longer.empty and len(longer) > current_len:
             hist = longer
     return stock, hist
@@ -2126,6 +2158,82 @@ def sort_hits(hits: List[ScreenerHit]) -> List[ScreenerHit]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Stocklake-first plan, P1: request handlers below read ONLY from these
+# caches — run_screener()/run_under20_screener()/run_high_volume_screener()
+# with force=True (the actual live fetch) are called exclusively by the
+# background refresh loop now. A request can still ask for `force=true`,
+# but that only nudges an out-of-band refresh along in the background and
+# still returns whatever's cached right now — it can no longer be the thing
+# that blocks on a live vendor call.
+# ---------------------------------------------------------------------------
+_MANUAL_REFRESH_LOCKS: Dict[str, threading.Lock] = {
+    "screener": threading.Lock(),
+    "under20": threading.Lock(),
+    "high_volume": threading.Lock(),
+}
+
+
+def _kick_background_refresh(key: str, fn) -> None:
+    """Fire-and-forget refresh for a user's force=true request. Guarded so a
+    burst of these (or one arriving mid-cycle of the scheduled background
+    refresh) can't pile up concurrent live fetches against the same cache —
+    a kick that can't get the lock is just a no-op; that request's response
+    still reflects whichever refresh is already in flight once it lands."""
+    lock = _MANUAL_REFRESH_LOCKS[key]
+    if not lock.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            fn()
+        except Exception as e:
+            logger.error(f"Manual refresh kick failed ({key}): {e}")
+        finally:
+            lock.release()
+
+    threading.Thread(target=run, daemon=True, name=f"refresh-kick-{key}").start()
+
+
+def screener_from_cache(force: bool = False) -> ScreenerResponse:
+    if force:
+        _kick_background_refresh("screener", lambda: run_screener(force=True))
+    cached = _SCREENER_CACHE.get("universe")
+    if cached:
+        return ScreenerResponse(**{**cached[1], "cached": True})
+    return ScreenerResponse(
+        buy_candidates=[], sell_candidates=[], scanned_count=0,
+        universe_note="Still warming up — the first scan hasn't finished yet. Try again in a moment.",
+        generated_at=datetime.now(timezone.utc).isoformat(), cached=False,
+    )
+
+
+def under20_from_cache(force: bool = False) -> ScreenerResponse:
+    if force:
+        _kick_background_refresh("under20", lambda: run_under20_screener(force=True))
+    cached = _UNDER20_CACHE.get("under20")
+    if cached:
+        return ScreenerResponse(**{**cached[1], "cached": True})
+    return ScreenerResponse(
+        buy_candidates=[], sell_candidates=[], scanned_count=0,
+        universe_note="Still warming up — the first scan hasn't finished yet. Try again in a moment.",
+        generated_at=datetime.now(timezone.utc).isoformat(), cached=False,
+    )
+
+
+def high_volume_from_cache(force: bool = False) -> HighVolumeResponse:
+    if force:
+        _kick_background_refresh("high_volume", lambda: run_high_volume_screener(force=True))
+    cached = _HIGH_VOLUME_CACHE.get("high_volume")
+    if cached:
+        return HighVolumeResponse(**{**cached[1], "cached": True})
+    return HighVolumeResponse(
+        stocks=[],
+        universe_note="Still warming up — the first scan hasn't finished yet. Try again in a moment.",
+        generated_at=datetime.now(timezone.utc).isoformat(), cached=False,
+    )
+
+
 def run_screener(force: bool = False) -> ScreenerResponse:
     if not force:
         cached = _SCREENER_CACHE.get("universe")
@@ -2236,17 +2344,25 @@ def fetch_high_volume_tickers(us_count: int = 15, ca_count: int = 5) -> List[str
         return [q["symbol"] for q in quotes if q.get("symbol")][:ca_count]
 
     tickers: List[str] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # Same reasoning as batch_score()'s guard: no `with ... as pool:` here,
+    # since that blocks on exit until both futures finish regardless of
+    # whether .result() already timed out — this call now feeds the
+    # background refresh loop, and a stalled yf.screen() must not be able to
+    # wedge that loop for good.
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
         us_future = pool.submit(fetch_us)
         ca_future = pool.submit(fetch_ca)
         try:
-            tickers.extend(us_future.result())
+            tickers.extend(us_future.result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS))
         except Exception as e:
             logger.warning(f"US high-volume screen fetch failed: {e}")
         try:
-            tickers.extend(ca_future.result())
+            tickers.extend(ca_future.result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS))
         except Exception as e:
             logger.warning(f"Canadian high-volume screen fetch failed: {e}")
+    finally:
+        pool.shutdown(wait=False)
 
     return tickers
 
@@ -3077,20 +3193,23 @@ def analyze_decision(ticker: str, request: AIDecisionRequest = AIDecisionRequest
 
 @app.get("/api/screener", response_model=ScreenerResponse)
 def screener(force: bool = False):
-    """Scan the fixed universe for current BUY / SELL technical signals."""
-    return run_screener(force=force)
+    """Scan the fixed universe for current BUY / SELL technical signals.
+    Reads the background-refreshed cache only — see screener_from_cache()."""
+    return screener_from_cache(force)
 
 
 @app.get("/api/screener/under20", response_model=ScreenerResponse)
 def screener_under20(force: bool = False):
-    """Canadian stocks under CAD $20, screened for current momentum signals."""
-    return run_under20_screener(force=force)
+    """Canadian stocks under CAD $20, screened for current momentum signals.
+    Reads the background-refreshed cache only — see under20_from_cache()."""
+    return under20_from_cache(force)
 
 
 @app.get("/api/screener/high-volume", response_model=HighVolumeResponse)
 def screener_high_volume(force: bool = False):
-    """Today's 20 highest-volume US and Canadian tickers, live — not limited to SCREENER_UNIVERSE."""
-    return run_high_volume_screener(force=force)
+    """Today's highest-volume US and Canadian tickers — not limited to SCREENER_UNIVERSE.
+    Reads the background-refreshed cache only — see high_volume_from_cache()."""
+    return high_volume_from_cache(force)
 
 
 @app.get("/api/screener/stocklake", response_model=StocklakeScreenerResponse)
@@ -3212,8 +3331,12 @@ def _get_anthropic_client() -> Optional[anthropic.Anthropic]:
 def digest(request: DigestRequest, force: bool = False):
     """
     The morning brief: portfolio status, watchlist signals, and screener hits
-    in one call. Technicals only — see the note field. Pass ?force=true to
-    bypass the screener's hourly cache and pull fresh signals.
+    in one call. Technicals only — see the note field. The fixed-universe and
+    under-$20 scans are read from a cache kept warm by a background refresh
+    loop (see _background_refresh_loop) rather than fetched live here, so
+    this endpoint can't be the thing that blocks on a slow or down vendor.
+    ?force=true nudges an out-of-band refresh along but still returns
+    whatever's cached right now, same as /api/screener.
 
     Returns the FULL scanned list for opportunities/warnings, not a capped
     top-N — the frontend decides how much to show by default and how much
@@ -3231,8 +3354,8 @@ def digest(request: DigestRequest, force: bool = False):
                 watchlist_signals.append(ScreenerHit(**r))
         watchlist_signals = sort_hits(watchlist_signals)
 
-    screen = run_screener(force=force)
-    under20 = run_under20_screener(force=force)
+    screen = screener_from_cache(force)
+    under20 = under20_from_cache(force)
 
     # Custom tickers the person added to the scan — scored live, uncached
     # (unlike the shared, cached fixed universe), then merged in below.
@@ -4529,6 +4652,7 @@ def compute_quality_score(info: dict) -> QualityScore:
 # ===========================================================================
 
 _REGIME_CACHE: Dict[str, Tuple[float, Any]] = {}
+_REGIME_TTL_SECONDS = 3600
 _MARKET_PULSE_CACHE: Tuple[float, Optional[dict]] = (0.0, None)
 
 
@@ -4555,7 +4679,7 @@ def _fetch_market_pulse() -> Optional[dict]:
 def get_market_regime(canadian: bool = False) -> MarketRegime:
     symbol = "^GSPTSE" if canadian else "^GSPC"
     cached = _REGIME_CACHE.get(symbol)
-    if cached and time.time() - cached[0] < 3600:
+    if cached and time.time() - cached[0] < _REGIME_TTL_SECONDS:
         return MarketRegime(**cached[1])
 
     fallback = MarketRegime(
@@ -5225,3 +5349,71 @@ def sync_set_key(key: str, request: SyncSetRequest, current_user: Dict[str, Any]
         return {"ok": True}
     finally:
         session.close()
+
+
+# ===========================================================================
+# BACKGROUND REFRESH LOOP
+#
+# Stocklake-first plan, P0+P1: nothing above this point should ever be the
+# thing a user request waits on. Screener, the under-$20 scan, high-volume,
+# and market regime were all previously fetched live on whichever request
+# happened to arrive after their cache went stale — meaning a slow or down
+# vendor turned into a slow or hung *response*. This loop refreshes those
+# same cache dicts proactively on a timer instead, so a request only ever
+# reads whatever's currently cached; see run_screener()/run_under20_screener()/
+# run_high_volume_screener()'s own force=True read-through-on-miss behavior
+# below for the "cache is still empty" edge case (a cold start, before this
+# loop's first cycle completes).
+#
+# Runs in a plain OS thread, not an asyncio task, because
+# fetch_stocklake_context() calls asyncio.run() internally — that raises if
+# invoked from a thread that already has a running event loop. uvicorn's
+# main thread has one; a plain background thread doesn't.
+# ===========================================================================
+
+_BACKGROUND_REFRESH_ENABLED = os.environ.get("DISABLE_BACKGROUND_REFRESH", "").lower() != "true"
+_BACKGROUND_REFRESH_TICK_SECONDS = 60
+
+
+def _background_refresh_loop() -> None:
+    # Small startup delay so this doesn't compete with the app's own
+    # first-request warm-up for the same worker/network resources.
+    time.sleep(5)
+    last_run = {"screener": 0.0, "under20": 0.0, "high_volume": 0.0, "regime": 0.0}
+    while True:
+        now = time.time()
+        if now - last_run["screener"] >= _SCREENER_TTL_SECONDS:
+            try:
+                run_screener(force=True)
+            except Exception as e:
+                logger.error(f"Background refresh failed (screener universe): {e}")
+            last_run["screener"] = time.time()
+        if now - last_run["under20"] >= _UNDER20_TTL_SECONDS:
+            try:
+                run_under20_screener(force=True)
+            except Exception as e:
+                logger.error(f"Background refresh failed (under-$20 universe): {e}")
+            last_run["under20"] = time.time()
+        if now - last_run["high_volume"] >= _HIGH_VOLUME_TTL_SECONDS:
+            try:
+                run_high_volume_screener(force=True)
+            except Exception as e:
+                logger.error(f"Background refresh failed (high-volume screener): {e}")
+            last_run["high_volume"] = time.time()
+        if now - last_run["regime"] >= _REGIME_TTL_SECONDS:
+            try:
+                get_market_regime(canadian=False)
+                get_market_regime(canadian=True)
+            except Exception as e:
+                logger.error(f"Background refresh failed (market regime): {e}")
+            last_run["regime"] = time.time()
+        time.sleep(_BACKGROUND_REFRESH_TICK_SECONDS)
+
+
+@app.on_event("startup")
+def _start_background_refresh() -> None:
+    if not _BACKGROUND_REFRESH_ENABLED:
+        logger.info("Background refresh loop disabled via DISABLE_BACKGROUND_REFRESH.")
+        return
+    threading.Thread(target=_background_refresh_loop, daemon=True, name="background-refresh").start()
+    logger.info("Background refresh loop started.")
