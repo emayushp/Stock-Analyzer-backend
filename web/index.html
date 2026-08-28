@@ -1141,6 +1141,13 @@ function Analyze({state, dispatch}) {
           <div className="lbl">Market conditions · {data.regime.index_used}</div>
           <b style={{display:"block",marginTop:4,color:/Falling|Choppy/.test(data.regime.regime)?"var(--amber)":"var(--green)"}}>{data.regime.regime}</b>
           <p>{data.regime.note}</p>
+          {(data.regime.vix!=null || data.regime.fear_greed_value!=null) &&
+            <p style={{marginTop:6,fontSize:11.5,opacity:.85}}>
+              {data.regime.vix!=null && <>VIX {data.regime.vix}</>}
+              {data.regime.vix!=null && data.regime.fear_greed_value!=null && " · "}
+              {data.regime.fear_greed_value!=null && <>Fear &amp; Greed {data.regime.fear_greed_value} ({data.regime.fear_greed_label})</>}
+              {data.regime.breadth_overbought_pct!=null && <> · {data.regime.breadth_overbought_pct}% of stocks overbought</>}
+            </p>}
         </div>}
 
       <div className="grid">

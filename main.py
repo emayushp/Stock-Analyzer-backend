@@ -318,6 +318,20 @@ class MarketRegime(BaseModel):
     index_vs_200ma: Optional[float]
     volatility_percentile: Optional[float]
     note: str
+    # Supplementary context from Stocklake's get_market_pulse — VIX, CNN-style
+    # fear/greed, and market-wide RSI breadth. Deliberately additive, not a
+    # replacement for index_vs_200ma/volatility_percentile above: those two
+    # are what apply_regime_check actually reads to move conviction, computed
+    # from a full 2-year daily history this app controls end to end. Market
+    # pulse is a live snapshot with no historical series behind it — same
+    # reason sector intelligence (see SectorIntelligence's docstring) stayed
+    # informational instead of replacing anything: there's nothing to backtest
+    # it against. None on any fetch failure — this whole block is optional.
+    vix: Optional[float] = None
+    fear_greed_value: Optional[int] = None
+    fear_greed_label: Optional[str] = None
+    breadth_oversold_pct: Optional[float] = None
+    breadth_overbought_pct: Optional[float] = None
 
 
 class SectorIntelligence(BaseModel):
@@ -4281,6 +4295,27 @@ def compute_quality_score(info: dict) -> QualityScore:
 # ===========================================================================
 
 _REGIME_CACHE: Dict[str, Tuple[float, Any]] = {}
+_MARKET_PULSE_CACHE: Tuple[float, Optional[dict]] = (0.0, None)
+
+
+def _fetch_market_pulse() -> Optional[dict]:
+    """
+    Cached separately from _REGIME_CACHE (keyed by US/CA symbol) since
+    market pulse is neither — one shared snapshot for the whole app, same
+    1h TTL as the regime calc it augments, so a US regime cache miss and a
+    CA regime cache miss within the same hour still only fetch this once.
+    """
+    global _MARKET_PULSE_CACHE
+    cached_at, cached_data = _MARKET_PULSE_CACHE
+    if cached_data is not None and time.time() - cached_at < 3600:
+        return cached_data
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        return None
+    payload = fetch_stocklake_context("__market_pulse__", {"pulse": ("get_market_pulse", {})}).get("pulse")
+    if not isinstance(payload, dict) or "error" in payload:
+        return None
+    _MARKET_PULSE_CACHE = (time.time(), payload)
+    return payload
 
 
 def get_market_regime(canadian: bool = False) -> MarketRegime:
@@ -4336,6 +4371,15 @@ def get_market_regime(canadian: bool = False) -> MarketRegime:
             volatility_percentile=round(vol_pct, 0),
             note=note,
         )
+        pulse = _fetch_market_pulse()
+        if pulse:
+            result.vix = pulse.get("vix")
+            fear_greed = pulse.get("fear_greed") or {}
+            result.fear_greed_value = fear_greed.get("value")
+            result.fear_greed_label = fear_greed.get("description")
+            breadth = pulse.get("breadth") or {}
+            result.breadth_oversold_pct = breadth.get("oversold_pct")
+            result.breadth_overbought_pct = breadth.get("overbought_pct")
         _REGIME_CACHE[symbol] = (time.time(), result.model_dump())
         return result
     except Exception as e:
