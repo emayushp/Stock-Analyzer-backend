@@ -5280,6 +5280,7 @@ def backtest_conviction_endpoint(ticker: str, period: str = "5y"):
 SYNC_ALLOWED_KEYS = {
     "ma_portfolio", "ma_watchlist", "ma_cash", "ma_journal", "ma_activity",
     "ma_scan_tickers", "ma_risk_pct", "ma_currency", "ma_ai_decisions",
+    "ma_price_alerts",
 }
 
 

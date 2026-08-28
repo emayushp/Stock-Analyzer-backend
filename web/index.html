@@ -259,7 +259,7 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const {useState,useEffect,useCallback,useRef} = React;
+const {useState,useEffect,useCallback,useRef,useMemo} = React;
 const API = "";  // same origin as the backend serving this page
 
 // Storage with in-memory fallback so the page still works if the browser
@@ -279,6 +279,7 @@ const AUTH_EMAIL_KEY = "ma_auth_email";
 const SYNC_ALLOWED_KEYS = new Set([
   "ma_portfolio","ma_watchlist","ma_cash","ma_journal","ma_activity",
   "ma_scan_tickers","ma_risk_pct","ma_currency","ma_ai_decisions",
+  "ma_price_alerts",
 ]);
 
 function authToken() { try { return localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; } }
@@ -1667,14 +1668,24 @@ const isCad = t => /\.(TO|V|CN)$/i.test(t||"");
 const CTag = ({t}) => <span className="mini" style={{color:"var(--muted)",borderColor:"var(--border)",
   background:"var(--border)",letterSpacing:".5px"}}>{isCad(t)?"CAD":"US"}</span>;
 
+const ALERT_CONDITIONS = [
+  ["rsi_below","RSI drops below"], ["rsi_above","RSI rises above"],
+  ["price_below","Price drops below"], ["price_above","Price rises above"],
+];
+const alertConditionLabel = k => (ALERT_CONDITIONS.find(([key])=>key===k)||[])[1] || k;
+
 function Brief({state, dispatch}) {
-  const {holdings, watchlist, scanTickers, setScanTickers} = state;
+  const {holdings, watchlist, scanTickers, setScanTickers, priceAlerts, setPriceAlerts} = state;
   const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
   const [refreshing,setRefreshing] = useState(false);
   const [showAllBuys,setShowAllBuys] = useState(false);
   const [showAllSells,setShowAllSells] = useState(false);
   const [addingScan,setAddingScan] = useState(false);
   const [scanInput,setScanInput] = useState("");
+  const [addingAlert,setAddingAlert] = useState(false);
+  const [alertTicker,setAlertTicker] = useState("");
+  const [alertCondition,setAlertCondition] = useState("rsi_below");
+  const [alertThreshold,setAlertThreshold] = useState("");
   const loadingRef = useRef(false);
 
   const load = useCallback(async (force)=>{
@@ -1702,6 +1713,46 @@ function Brief({state, dispatch}) {
     setScanInput(""); setAddingScan(false);
   };
   const removeScan = t => setScanTickers(scanTickers.filter(x=>x!==t));
+
+  const addAlert = () => {
+    const t = alertTicker.trim().toUpperCase();
+    const threshold = parseFloat(alertThreshold);
+    if (!t || isNaN(threshold)) return;
+    setPriceAlerts([...priceAlerts, {id:`${t}-${Date.now()}`, ticker:t, condition:alertCondition, threshold}]);
+    setAlertTicker(""); setAlertThreshold(""); setAddingAlert(false);
+  };
+  const removeAlert = id => setPriceAlerts(priceAlerts.filter(a=>a.id!==id));
+
+  // Every rule is checked against data the Brief scan already fetched — no
+  // separate live lookup per alert, same "reads the warm store, doesn't
+  // fetch live" spirit as the rest of the Stocklake-first plan. A ticker
+  // this Brief didn't happen to scan (not held, watched, on the custom scan
+  // list, or in either fixed universe) just can't be evaluated yet; the
+  // alert row says so rather than silently never firing.
+  const tickerLookup = useMemo(() => {
+    if (!d) return {};
+    const rows = [
+      ...(d.portfolio?.holdings||[]).map(h=>({ticker:h.ticker, price:h.current_price, rsi:h.rsi})),
+      ...(d.watchlist_signals||[]), ...(d.opportunities||[]), ...(d.warnings||[]),
+      ...(d.under20_buys||[]), ...(d.under20_avoid||[]),
+    ];
+    const lookup = {};
+    rows.forEach(r => { if (r.ticker) lookup[r.ticker] = r; });
+    return lookup;
+  }, [d]);
+
+  const alertStatus = a => {
+    const row = tickerLookup[a.ticker];
+    if (!row) return {known:false, hit:false};
+    const val = a.condition.startsWith("rsi") ? row.rsi : row.price;
+    if (val==null) return {known:false, hit:false};
+    const hit = a.condition==="rsi_below" ? val < a.threshold
+      : a.condition==="rsi_above" ? val > a.threshold
+      : a.condition==="price_below" ? val < a.threshold
+      : val > a.threshold;
+    return {known:true, hit, val};
+  };
+  const triggeredAlerts = priceAlerts.map(a=>({...a, ...alertStatus(a)})).filter(a=>a.hit);
 
   const list = (rows,title,extra) => rows?.length>0 && <div className="card">
     <h2>{title}{extra}</h2>
@@ -1748,6 +1799,14 @@ function Brief({state, dispatch}) {
           </div>
         </div>
       </div>
+      {triggeredAlerts.length>0 && <div className="card" style={{borderColor:"var(--amber)"}}>
+        <h2>🔔 {triggeredAlerts.length} Alert{triggeredAlerts.length===1?"":"s"} Triggered</h2>
+        {triggeredAlerts.map(a=><div className="srow" key={a.id} onClick={()=>dispatch({type:"analyze", ticker:a.ticker})}>
+          <Avatar t={a.ticker}/>
+          <div style={{flex:1}}><b className="num">{a.ticker}</b>
+            <div className="meta">{alertConditionLabel(a.condition)} {a.threshold} — currently {a.val}</div></div>
+        </div>)}
+      </div>}
       {d.portfolio?.holdings?.length>0 && list(d.portfolio.holdings.map(h=>({
         ticker:h.ticker,price:h.current_price,change_pct:h.unrealized_pl_pct,rsi:h.rsi,
         volume_ratio:h.volume_ratio,signal:h.signal,conviction:h.conviction})),"Your Holdings")}
@@ -1768,6 +1827,42 @@ function Brief({state, dispatch}) {
         </div>}
         {scanTickers.length>0 && <div className="chips" style={{marginTop:12,marginBottom:0}}>
           {scanTickers.map(t=><div key={t} className="chip" onClick={()=>removeScan(t)}>{t} ✕</div>)}
+        </div>}
+      </div>
+
+      <div className="card">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h2 style={{marginBottom:0}}>Price Alerts</h2>
+          <button className="link" onClick={()=>setAddingAlert(!addingAlert)}>{addingAlert?"Cancel":"+ Add alert"}</button>
+        </div>
+        <p className="mut" style={{marginTop:6}}>Checked against this Brief's own scan — holdings, watchlist,
+          custom scan list, and both fixed universes. A ticker outside all of those can't be evaluated yet.</p>
+        {addingAlert && <div style={{marginTop:12}}>
+          <div className="chips" style={{marginBottom:8}}>
+            {ALERT_CONDITIONS.map(([k,l])=>
+              <div key={k} className={"chip"+(alertCondition===k?" on":"")} onClick={()=>setAlertCondition(k)}>{l}</div>)}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <input placeholder="Ticker, e.g. AAPL" value={alertTicker} style={{flex:1}}
+              onChange={e=>setAlertTicker(e.target.value.toUpperCase())}
+              onKeyDown={e=>e.key==="Enter"&&addAlert()}/>
+            <input placeholder="Threshold" value={alertThreshold} type="number" style={{width:110}}
+              onChange={e=>setAlertThreshold(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&addAlert()}/>
+            <button className="btn" onClick={addAlert}>Add</button>
+          </div>
+        </div>}
+        {priceAlerts.length>0 && <div style={{marginTop:12,display:"flex",flexDirection:"column",gap:8}}>
+          {priceAlerts.map(a=>{
+            const st = alertStatus(a);
+            return <div key={a.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",fontSize:13}}>
+              <span><b className="num">{a.ticker}</b> — {alertConditionLabel(a.condition)} {a.threshold}
+                {st.known ? <span className="mut" style={{marginLeft:6}}>(now {st.val})</span>
+                  : <span className="mut" style={{marginLeft:6}}>(not in this scan yet)</span>}
+              </span>
+              <button className="link" onClick={()=>removeAlert(a.id)}>Remove</button>
+            </div>;
+          })}
         </div>}
       </div>
 
@@ -2505,6 +2600,7 @@ function App() {
   const verdictTickerRef = useRef(null);
   const [watchlist,setWatchlist] = useState(()=>store.get("ma_watchlist",[]));
   const [scanTickers,setScanTickers] = useState(()=>store.get("ma_scan_tickers",[]));
+  const [priceAlerts,setPriceAlertsRaw] = useState(()=>store.get("ma_price_alerts",[]));
   const [holdings,setHoldings] = useState(()=>store.get("ma_portfolio",[]));
   const [cash,setCash] = useState(()=>store.get("ma_cash",0));
   const [journal,setJournal] = useState(()=>store.get("ma_journal",[]));
@@ -2537,6 +2633,10 @@ function App() {
     setScanTickers(list); store.set("ma_scan_tickers", list);
   }, []);
 
+  const setPriceAlerts = useCallback(list => {
+    setPriceAlertsRaw(list); store.set("ma_price_alerts", list);
+  }, []);
+
   const [authEmail, setAuthEmail] = useState(() => {
     try { return localStorage.getItem(AUTH_EMAIL_KEY) || null; } catch { return null; }
   });
@@ -2553,6 +2653,7 @@ function App() {
     if ("ma_journal" in data) setJournal(data.ma_journal);
     if ("ma_activity" in data) setActivity(data.ma_activity);
     if ("ma_scan_tickers" in data) setScanTickers(data.ma_scan_tickers);
+    if ("ma_price_alerts" in data) setPriceAlertsRaw(data.ma_price_alerts);
   }, []);
 
   // Already signed in from a previous visit — pull the latest synced state
@@ -2721,7 +2822,8 @@ function App() {
   },[watchlist,analyze,tab,returnTab]);
 
   const state = {q,data,busy,err,watchlist,holdings,cash,journal,activity,portfolioValue,returnTab,
-    scanTickers,setScanTickers:setScanTickersPersist,verdictLoading,verdictError,requestDecision,theme,setTheme,
+    scanTickers,setScanTickers:setScanTickersPersist,priceAlerts,setPriceAlerts,
+    verdictLoading,verdictError,requestDecision,theme,setTheme,
     authEmail,authBusy,authErr,signup,login,logout};
 
   return <>
