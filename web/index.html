@@ -362,7 +362,7 @@ function resolvedHistoryFor(ticker, currentPrice) {
 
 const SIG = { BUY:"var(--green)", SELL:"var(--red)", HOLD:"var(--amber)" };
 const TABS = [["portfolio","Portfolio","pie"],["analyze","Analyze","search"],["brief","Brief","sun"],
-  ["screener","Screener","filter"],["activity","Activity","book"],["journal","Journal","note"],
+  ["screener","Screener","filter"],["pulse","Pulse","pulse"],["activity","Activity","book"],["journal","Journal","note"],
   ["learn","Learn","cap"],["settings","Settings","gear"]];
 const TAB_LABELS = Object.fromEntries(TABS.map(([k,l])=>[k,l]));
 const NAV_ICON_PATHS = {
@@ -374,6 +374,7 @@ const NAV_ICON_PATHS = {
   note: "M6 2h9l5 5v15H6z M15 2v5h5 M9 12h6 M9 16h6",
   cap: "M2 9 12 4l10 5-10 5-10-5Z M6 11v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5",
   gear: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1",
+  pulse: "M2 12h4l2.5-7 3 14 2.5-11 2 4h6",
 };
 const NavIcon = ({name}) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
   <path d={NAV_ICON_PATHS[name] || ""}/>
@@ -1271,6 +1272,22 @@ function Analyze({state, dispatch}) {
             {data.sector_intelligence.drivers && <p className="plain" style={{marginTop:12}}>{data.sector_intelligence.drivers}</p>}
             {data.sector_intelligence.alert && <p className="note" style={{color:"var(--red)"}}>{data.sector_intelligence.alert}</p>}
             <p className="note">Informational only — a real-time sector snapshot via Stocklake, refreshed every few hours. Not backtestable (no historical time series available) and not factored into the signal above.</p>
+          </div>}
+
+          {data.analyst_consensus && <div className="card">
+            <h2>Analyst Consensus</h2>
+            {data.analyst_consensus.rating && <span className="mini" style={{
+              color:/buy/i.test(data.analyst_consensus.rating)?"var(--green)":/sell/i.test(data.analyst_consensus.rating)?"var(--red)":"var(--muted)",
+              borderColor:"transparent",
+              background:(/buy/i.test(data.analyst_consensus.rating)?"var(--green)":/sell/i.test(data.analyst_consensus.rating)?"var(--red)":"var(--muted)")+"1F",
+              textTransform:"uppercase"}}>{data.analyst_consensus.rating.replace(/_/g," ")}</span>}
+            {data.analyst_consensus.target!=null && <Row l="Price target" v={
+              `${data.analyst_consensus.target}` + (data.current_price!=null
+                ? ` (${data.analyst_consensus.target>=data.current_price?"+":""}${((data.analyst_consensus.target-data.current_price)/data.current_price*100).toFixed(1)}%)`
+                : "")
+            }/>}
+            {data.analyst_consensus.analyst_count!=null && <Row l="Analysts covering" v={data.analyst_consensus.analyst_count}/>}
+            <p className="note">Informational only — Wall Street's own consensus via Stocklake, not factored into the signal above.</p>
           </div>}
         </div>
       </div>
@@ -2280,6 +2297,58 @@ function Screener({dispatch}) {
 }
 
 /* ===== Learn — Stocks 101, plain-English accordion ===== */
+function MarketPulse() {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+
+  useEffect(()=>{
+    let dead = false;
+    api("/api/market-pulse").then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[]);
+
+  const fgColor = d?.fear_greed_value==null ? "var(--muted)" :
+    d.fear_greed_value <= 25 ? "var(--red)" : d.fear_greed_value >= 75 ? "var(--green)" : "var(--amber)";
+
+  return <>
+    <div style={{margin:"28px 0 20px"}}><h1>Market Pulse</h1>
+      <div className="tag" style={{marginTop:3}}>VIX · fear &amp; greed · breadth — market-wide, not tied to one ticker</div></div>
+
+    {busy && <Spin t="Reading the market's pulse…"/>}
+    {err && <div className="err"><b>Couldn't load market pulse</b>{err}</div>}
+    {!busy && !err && d && <>
+      <div className="grid">
+        <div className="card">
+          <div className="lbl">VIX</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.vix ?? "—"}</div>
+          <p className="mut" style={{marginTop:8,fontSize:12.5}}>The market's own "fear gauge" — expected volatility over the next 30 days. Higher means more turbulence priced in.</p>
+        </div>
+        <div className="card">
+          <div className="lbl">Fear &amp; Greed</div>
+          <div style={{display:"flex",alignItems:"baseline",gap:9,marginTop:6}}>
+            <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,color:fgColor}}>{d.fear_greed_value ?? "—"}</div>
+            {d.fear_greed_label && <span className="mini" style={{color:fgColor,borderColor:"transparent",background:fgColor+"1F",textTransform:"uppercase"}}>{d.fear_greed_label}</span>}
+          </div>
+          <p className="mut" style={{marginTop:8,fontSize:12.5}}>0 is extreme fear, 100 is extreme greed — often a contrarian read: extremes can mark exhaustion, not direction.</p>
+        </div>
+        <div className="card">
+          <div className="lbl">Breadth — Oversold</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.breadth_oversold_pct!=null?`${d.breadth_oversold_pct}%`:"—"}</div>
+          <p className="mut" style={{marginTop:8,fontSize:12.5}}>Share of stocks technically oversold right now. A high reading alongside a falling market can signal capitulation.</p>
+        </div>
+        <div className="card">
+          <div className="lbl">Breadth — Overbought</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.breadth_overbought_pct!=null?`${d.breadth_overbought_pct}%`:"—"}</div>
+          <p className="mut" style={{marginTop:8,fontSize:12.5}}>Share of stocks technically overbought right now. A high reading in a rally can mean stretched, not necessarily done.</p>
+        </div>
+      </div>
+      <p className="note" style={{marginTop:18}}>{d.note}</p>
+      <p className="center" style={{fontSize:11,padding:"10px 0"}}>Updated {new Date(d.generated_at).toLocaleString()}</p>
+    </>}
+  </>;
+}
+
 const LEARN_SECTIONS = [
   {t:"What is a stock?", b:"A share of stock is a tiny slice of ownership in a company. Its price is simply whatever a buyer and seller last agreed it's worth — not a fixed value set by the company. That's why the same stock can trade at different prices minute to minute, even if nothing about the actual business changed."},
   {t:"What actually moves the price?", b:"In the short term: supply and demand — more buyers than sellers pushes price up, and vice versa. What drives that demand includes earnings reports, news, interest rates, sector trends, and plain sentiment. In the long term, price tends to track the company's actual profits and growth. Short-term moves and long-term value can disagree for a long time before they converge."},
@@ -2675,6 +2744,7 @@ function App() {
       {tab==="brief" && <Brief state={state} dispatch={dispatch}/>}
       {tab==="journal" && <Journal state={state} dispatch={dispatch}/>}
       {tab==="screener" && <Screener state={state} dispatch={dispatch}/>}
+      {tab==="pulse" && <MarketPulse/>}
       {tab==="learn" && <Learn state={state} dispatch={dispatch}/>}
       {tab==="settings" && <Settings state={state} dispatch={dispatch}/>}
     </div>

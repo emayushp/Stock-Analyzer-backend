@@ -385,6 +385,22 @@ class InsiderActivity(BaseModel):
     total_holders: Optional[int] = None
 
 
+class AnalystConsensus(BaseModel):
+    """
+    Wall Street's own consensus (rating, price target, analyst count) from
+    Stocklake's get_stock — already fetched by analyze() for every ticker
+    (it's part of the same payload quality/fundamentals/earnings pull from),
+    just never surfaced before now. Informational only, same posture as
+    insider activity and sector intelligence: an analyst consensus is
+    someone else's opinion, not a backtested signal, so it stays out of
+    this app's own conviction scoring.
+    """
+    rating: Optional[str] = None
+    rating_score: Optional[float] = None
+    target: Optional[float] = None
+    analyst_count: Optional[int] = None
+
+
 class AnalysisResponse(BaseModel):
     ticker: str
     company_name: str
@@ -404,6 +420,7 @@ class AnalysisResponse(BaseModel):
     sentiment_analysis: SentimentAnalysis
     insider_activity: Optional[InsiderActivity] = None
     sector_intelligence: Optional[SectorIntelligence] = None
+    analyst_consensus: Optional[AnalystConsensus] = None
     generated_at: str
     cached: bool = False
 
@@ -499,6 +516,23 @@ class StocklakeScreenerResponse(BaseModel):
     count: int
     preset: Optional[str] = None
     results: List[StocklakeScreenerHit]
+    note: str
+
+
+class MarketPulseResponse(BaseModel):
+    """
+    Standalone version of the same market-pulse snapshot get_market_regime()
+    already folds into the Analyze page's regime card — pulled out onto its
+    own page (Stocklake-first plan, P5c) since VIX/fear-greed/breadth are
+    market-wide context worth their own screen, not just a line under one
+    ticker's regime note.
+    """
+    vix: Optional[float] = None
+    fear_greed_value: Optional[int] = None
+    fear_greed_label: Optional[str] = None
+    breadth_oversold_pct: Optional[float] = None
+    breadth_overbought_pct: Optional[float] = None
+    generated_at: str
     note: str
 
 
@@ -1793,6 +1827,30 @@ def map_insider_activity(payload: Any, symbol_validated: bool) -> Optional[Insid
     )
 
 
+def map_analyst_consensus(stocklake_data: Optional[dict]) -> Optional[AnalystConsensus]:
+    """
+    Maps the analyst_rating/analyst_rating_score/analyst_target/analyst_count
+    fields off an already-validated get_stock() payload — the same call
+    validate_stocklake_stock() already checked for wrong-company
+    substitution, so no separate check needed here. Returns None rather
+    than an all-null consensus when the payload has nothing to show, same
+    as every other Stocklake mapper in this app.
+    """
+    if not stocklake_data:
+        return None
+    if all(
+        stocklake_data.get(k) is None
+        for k in ("analyst_rating", "analyst_target", "analyst_count")
+    ):
+        return None
+    return AnalystConsensus(
+        rating=stocklake_data.get("analyst_rating"),
+        rating_score=stocklake_data.get("analyst_rating_score"),
+        target=stocklake_data.get("analyst_target"),
+        analyst_count=stocklake_data.get("analyst_count"),
+    )
+
+
 # yfinance's `info["sector"]` doesn't use the same names as Stocklake's
 # fixed 11-sector (GICS-style) taxonomy for four of the eleven — the other
 # seven pass through unchanged. Passing the yfinance name straight through
@@ -2982,6 +3040,7 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
     )
     insider_activity = map_insider_activity(stocklake_context.get("insider"), stocklake_stock_data is not None)
     sector_intelligence = map_sector_intelligence(stocklake_context.get("sector"), stocklake_sector)
+    analyst_consensus = map_analyst_consensus(stocklake_stock_data)
 
     fundamentals = build_fundamentals(info, current_price)
     quality = compute_quality_score(_merge_stocklake_fundamentals(info, stocklake_stock_data))
@@ -3077,6 +3136,7 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
         sentiment_analysis=sentiment,
         insider_activity=insider_activity,
         sector_intelligence=sector_intelligence,
+        analyst_consensus=analyst_consensus,
         generated_at=datetime.now(timezone.utc).isoformat(),
         cached=False,
     )
@@ -3259,6 +3319,37 @@ def screener_stocklake(
             "Discovery via Stocklake's own AI-scored screener — a different "
             "methodology and a much larger universe than this app's own Screener. "
             "Not backtest-validated by this app."
+        ),
+    )
+
+
+@app.get("/api/market-pulse", response_model=MarketPulseResponse)
+def market_pulse():
+    """
+    Standalone market-wide snapshot (Stocklake-first plan, P5c) — the same
+    _fetch_market_pulse() data get_market_regime() already folds into every
+    Analyze page, exposed here on its own so it doesn't require picking a
+    ticker to see how jumpy or calm the broad market is right now.
+    """
+    pulse = _fetch_market_pulse()
+    if not pulse:
+        raise HTTPException(
+            status_code=503,
+            detail="Market pulse isn't available right now — Stocklake may be unconfigured or unreachable.",
+        )
+    fear_greed = pulse.get("fear_greed") or {}
+    breadth = pulse.get("breadth") or {}
+    return MarketPulseResponse(
+        vix=pulse.get("vix"),
+        fear_greed_value=fear_greed.get("value"),
+        fear_greed_label=fear_greed.get("description"),
+        breadth_oversold_pct=breadth.get("oversold_pct"),
+        breadth_overbought_pct=breadth.get("overbought_pct"),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        note=(
+            "Market-wide snapshot via Stocklake — VIX, fear/greed, and the share "
+            "of stocks technically oversold or overbought right now. Refreshed "
+            "roughly hourly; informational only, not tied to any one ticker's signal."
         ),
     )
 
