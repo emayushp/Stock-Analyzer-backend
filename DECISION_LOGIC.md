@@ -229,11 +229,24 @@ ticker opened individually.
 
 ## §14 News sentiment — *Analyze endpoint only, informational*
 
-Up to 5 recent headlines scored with a FinBERT sentiment model
-(positive/negative/neutral, each with a confidence). A directional average
-maps to a 0–1 `bullish_score`: >0.6 supportive, <0.4 pressuring, otherwise
-neutral. Displayed and passed to the AI Decision (§15) as context — **it
-never adjusts `technical.conviction`**, unlike §7–§11.
+Up to 5 recent AI-analyzed articles from Stocklake's news pipeline
+(`get_stock_news`), each already carrying a sentiment label
+(positive/negative/neutral — "mixed" collapses to neutral) and a
+`signal_score` (0–100, "how strong is this idea") used as that article's
+weight. A directional average of those weights maps to a 0–1
+`bullish_score`: >0.6 supportive, <0.4 pressuring, otherwise neutral.
+Displayed and passed to the AI Decision (§15) as context — **it never
+adjusts `technical.conviction`**, unlike §7–§11.
+
+Requires `STOCKLAKE_API_KEY`; silently falls back to a neutral placeholder
+otherwise (same pattern as §15's `ANTHROPIC_API_KEY`). Stocklake is an
+MCP server rather than a plain REST API, so this runs as a real MCP
+client session (protocol handshake + one tool call) inside the request —
+a known cost this pays that a local model didn't, budgeted with an 8-second
+timeout and degrading to the same neutral placeholder on any failure.
+(Previously ran a local FinBERT model over yfinance headlines with a
+regex table guessing why each headline mattered; Stocklake's articles
+carry a real generated summary instead.)
 
 ## §15 The AI Decision layer — *opt-in, one ticker at a time*
 

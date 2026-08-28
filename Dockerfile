@@ -8,14 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-
-# Install everything except torch first
-RUN grep -v "^torch" requirements.txt > requirements-no-torch.txt \
-    && pip install --no-cache-dir -r requirements-no-torch.txt
-
-# Install CPU-only torch — this is a fraction of the size of the default
-# CUDA build and is all that's needed to run FinBERT for inference.
-RUN pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py db.py auth.py .
 COPY web ./web
