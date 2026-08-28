@@ -536,6 +536,21 @@ class MarketPulseResponse(BaseModel):
     note: str
 
 
+class UpcomingEarning(BaseModel):
+    ticker: str
+    earnings_date: str
+    is_estimate: bool
+
+
+class EarningsCalendarRequest(BaseModel):
+    tickers: List[str]
+
+
+class EarningsCalendarResponse(BaseModel):
+    upcoming: List[UpcomingEarning]
+    note: str
+
+
 class HighVolumeResponse(BaseModel):
     stocks: List[ScreenerHit]
     universe_note: str
@@ -1343,6 +1358,33 @@ def apply_regime_check(technical: TechnicalAnalysis, regime: "MarketRegime") -> 
     return technical
 
 
+def _parse_future_stocklake_earnings_date(raw: Optional[str], ticker: str) -> Optional[str]:
+    """
+    Parses get_stock()/get_stocks()'s earnings_date field into a plain
+    YYYY-MM-DD, or None if it's missing, unparseable, or already in the
+    past. Shared by fetch_earnings() (single ticker) and the earnings
+    calendar endpoint (batch) so both agree on what "upcoming" means.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        # Every live response observed so far uses a +00:00 offset, but
+        # nothing guarantees that always holds — normalize to UTC (and
+        # treat a naive timestamp as already UTC) before taking .date(),
+        # so a non-UTC offset can't shift the calendar date by a day in
+        # either direction right around midnight.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed_date = parsed.astimezone(timezone.utc).date()
+        if parsed_date >= datetime.now(timezone.utc).date():
+            return parsed_date.strftime("%Y-%m-%d")
+        return None
+    except Exception as e:
+        logger.info(f"Couldn't parse Stocklake earnings_date for {ticker}: {e}")
+        return None
+
+
 def fetch_earnings(
     stock: yf.Ticker, ticker: str, stocklake_data: Optional[dict] = None
 ) -> EarningsInfo:
@@ -1376,22 +1418,9 @@ def fetch_earnings(
         note="Earnings data isn't available for this ticker.",
     )
 
-    next_date = None
-    if stocklake_data and stocklake_data.get("earnings_date"):
-        try:
-            parsed = datetime.fromisoformat(stocklake_data["earnings_date"])
-            # Every live response observed so far uses a +00:00 offset, but
-            # nothing guarantees that always holds — normalize to UTC (and
-            # treat a naive timestamp as already UTC) before taking .date(),
-            # so a non-UTC offset can't shift the calendar date by a day in
-            # either direction right around midnight.
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            parsed_date = parsed.astimezone(timezone.utc).date()
-            if parsed_date >= datetime.now(timezone.utc).date():
-                next_date = parsed_date.strftime("%Y-%m-%d")
-        except Exception as e:
-            logger.info(f"Couldn't parse Stocklake earnings_date for {ticker}: {e}")
+    next_date = _parse_future_stocklake_earnings_date(
+        stocklake_data.get("earnings_date") if stocklake_data else None, ticker
+    )
 
     def fetch_next_date_yf():
         cal = stock.calendar or {}
@@ -2046,24 +2075,23 @@ def _score_from_stocklake(ticker: str, data: dict) -> Optional[Dict[str, Any]]:
     }
 
 
-def stocklake_batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+def _stocklake_batch_stocks(tickers: List[str]) -> Dict[str, dict]:
     """
-    Primary path for batch_score() below: Stocklake's precomputed
-    fundamentals+indicators (get_stocks), scored through this app's own
-    generate_signal() rule rather than trusting Stocklake's own verdict —
-    added after yfinance was observed rate-limited/blocked from this
-    deployment for 30+ minutes straight on 2026-08-28, taking Brief and
-    Screener down with it while every Stocklake call kept succeeding.
+    Raw get_stocks() payload for a list of tickers, chunked to Stocklake's
+    25-symbol batch cap with every chunk sharing ONE MCP session (same
+    reasoning as fetch_stocklake_context's own docstring: a full-universe
+    scan can need 15+ chunked calls, and paying a separate handshake per
+    chunk would be slow and reintroduce the kind of unbounded-latency risk
+    the Stocklake-first plan exists to route around).
 
     Skips any ticker whose Stocklake lookup symbol differs from the ticker
     itself (i.e. suffix-stripped Canadian listings like .TO/.V/.CN/.NE) —
     validating that a stripped-suffix lookup is actually the same company
     needs the country/name check analyze() does per-ticker (see
-    validate_stocklake_stock), which isn't affordable at batch-scan scale
-    across a full universe. Those tickers, and anything Stocklake's own
-    batch call didn't return, are left for batch_score()'s yfinance
-    fallback below instead of risking a silently wrong company's data on a
-    BUY/SELL screener row.
+    validate_stocklake_stock), which isn't affordable at batch scale. Used
+    by both stocklake_batch_score() (technicals for the signal engine) and
+    the earnings-calendar endpoint (each ticker's own earnings_date field) —
+    one shared, verified fetch path instead of two.
     """
     if not os.environ.get("STOCKLAKE_API_KEY"):
         return {}
@@ -2072,19 +2100,14 @@ def stocklake_batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     if not direct_tickers:
         return {}
 
-    # One shared MCP session for every chunk (same reasoning as
-    # fetch_stocklake_context's own docstring: a full-universe scan can
-    # need 15+ chunked get_stocks calls, and paying a separate handshake
-    # for each would be slow and, worse, reintroduce the kind of
-    # unbounded-latency risk this whole function exists to route around).
     chunks = [
         direct_tickers[i : i + STOCKLAKE_BATCH_CHUNK_SIZE]
         for i in range(0, len(direct_tickers), STOCKLAKE_BATCH_CHUNK_SIZE)
     ]
     want = {f"chunk_{i}": ("get_stocks", {"symbols": chunk}) for i, chunk in enumerate(chunks)}
-    context = fetch_stocklake_context("__batch_score__", want)
+    context = fetch_stocklake_context("__batch_stocks__", want)
 
-    results: Dict[str, Dict[str, Any]] = {}
+    results: Dict[str, dict] = {}
     direct_set = set(direct_tickers)
     for key in want:
         payload = context.get(key)
@@ -2094,9 +2117,29 @@ def stocklake_batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
             ticker = symbol.upper()
             if ticker not in direct_set or not isinstance(data, dict):
                 continue
-            scored = _score_from_stocklake(ticker, data)
-            if scored is not None:
-                results[ticker] = scored
+            results[ticker] = data
+    return results
+
+
+def stocklake_batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Primary path for batch_score() below: Stocklake's precomputed
+    fundamentals+indicators (get_stocks), scored through this app's own
+    generate_signal() rule rather than trusting Stocklake's own verdict —
+    added after yfinance was observed rate-limited/blocked from this
+    deployment for 30+ minutes straight on 2026-08-28, taking Brief and
+    Screener down with it while every Stocklake call kept succeeding.
+
+    Anything _stocklake_batch_stocks() skipped or Stocklake's own batch
+    call didn't return is left for batch_score()'s yfinance fallback below
+    instead of risking a silently wrong company's data on a BUY/SELL
+    screener row.
+    """
+    results: Dict[str, Dict[str, Any]] = {}
+    for ticker, data in _stocklake_batch_stocks(tickers).items():
+        scored = _score_from_stocklake(ticker, data)
+        if scored is not None:
+            results[ticker] = scored
     return results
 
 
@@ -3350,6 +3393,49 @@ def market_pulse():
             "Market-wide snapshot via Stocklake — VIX, fear/greed, and the share "
             "of stocks technically oversold or overbought right now. Refreshed "
             "roughly hourly; informational only, not tied to any one ticker's signal."
+        ),
+    )
+
+
+@app.post("/api/earnings-calendar", response_model=EarningsCalendarResponse)
+def earnings_calendar(request: EarningsCalendarRequest):
+    """
+    Upcoming earnings dates across a list of tickers (Stocklake-first plan,
+    P5a) — the frontend passes holdings + watchlist, the same tickers Brief
+    already scans. Reuses the exact earnings_date/earnings_is_estimate
+    fields fetch_earnings() already relies on for a single ticker, just
+    batched via _stocklake_batch_stocks() instead of a per-ticker call, so
+    nothing here is a new, unverified Stocklake schema — same fields, same
+    parsing rule (_parse_future_stocklake_earnings_date), just scanned
+    across many tickers instead of one.
+
+    Deliberately not the dedicated get_earnings_calendar/get_earnings_
+    intelligence tools — this app hasn't verified their response shape
+    against a live call yet, so it's not guessed at here. Full historical
+    surprise data (beat/miss vs. estimate) also isn't available this way;
+    that stays a per-ticker-only feature on the Analyze page.
+    """
+    tickers = [t.strip().upper() for t in request.tickers if t and t.strip()]
+    if not tickers:
+        return EarningsCalendarResponse(upcoming=[], note="No tickers to check.")
+
+    raw = _stocklake_batch_stocks(tickers)
+    upcoming: List[UpcomingEarning] = []
+    for ticker, data in raw.items():
+        date = _parse_future_stocklake_earnings_date(data.get("earnings_date"), ticker)
+        if date:
+            upcoming.append(UpcomingEarning(
+                ticker=ticker, earnings_date=date,
+                is_estimate=bool(data.get("earnings_is_estimate")),
+            ))
+    upcoming.sort(key=lambda e: e.earnings_date)
+
+    return EarningsCalendarResponse(
+        upcoming=upcoming,
+        note=(
+            "Upcoming earnings dates via Stocklake, checked against the tickers you "
+            "hold or watch. Suffix-stripped Canadian tickers and anything outside "
+            "Stocklake's ~3,500-symbol universe can't be checked this way."
         ),
     )
 
