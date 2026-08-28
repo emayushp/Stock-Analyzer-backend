@@ -1332,24 +1332,84 @@ STOCKLAKE_TIMEOUT_SECONDS = 8
 _STOCKLAKE_SENTIMENT_MAP = {"positive": "positive", "negative": "negative", "neutral": "neutral", "mixed": "neutral"}
 
 
-async def _fetch_stocklake_articles(ticker: str, api_key: str) -> List[dict]:
+async def _stocklake_call_tool(session: ClientSession, tool: str, arguments: dict, timeout: timedelta) -> Any:
+    """Calls one Stocklake tool within an already-initialized session and
+    returns its parsed JSON payload. Raises on a tool-level error or a
+    response with no parseable text content — callers decide how to degrade."""
+    result = await session.call_tool(tool, arguments, read_timeout_seconds=timeout)
+    if result.isError:
+        raise RuntimeError(f"Stocklake tool '{tool}' returned an error for arguments {arguments}")
+    for block in result.content:
+        if isinstance(block, TextContent):
+            return json.loads(block.text)
+    raise RuntimeError(f"Stocklake tool '{tool}' returned no parseable content")
+
+
+async def _stocklake_fetch(api_key: str, calls: Dict[str, Tuple[str, dict]], timeout: timedelta) -> Dict[str, Any]:
+    """
+    Opens exactly ONE MCP session (one handshake) and runs every call in
+    `calls` against it sequentially, returning {key: payload_or_exception}.
+    One tool failing doesn't take the others down with it — each result is
+    either the parsed payload or the Exception raised trying to get it;
+    callers decide per-key how to degrade.
+
+    This is the reason to route every Stocklake integration through here
+    rather than each opening its own session: a session handshake is real,
+    non-trivial latency (see the trade-off note above), and an analyze()
+    call that wants sentiment + earnings + fundamentals from Stocklake
+    should pay that handshake cost once, not three times.
+    """
     headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = timedelta(seconds=STOCKLAKE_TIMEOUT_SECONDS)
+    results: Dict[str, Any] = {}
     async with streamablehttp_client(STOCKLAKE_MCP_URL, headers=headers, timeout=timeout) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            result = await session.call_tool(
-                "get_stock_news",
-                {"symbol": ticker, "days": 14, "limit": 5},
-                read_timeout_seconds=timeout,
-            )
-            if result.isError:
-                raise RuntimeError(f"Stocklake get_stock_news returned an error for {ticker}")
-            for block in result.content:
-                if isinstance(block, TextContent):
-                    payload = json.loads(block.text)
-                    return payload.get("articles", [])
-            return []
+            for key, (tool, arguments) in calls.items():
+                try:
+                    results[key] = await _stocklake_call_tool(session, tool, arguments, timeout)
+                except Exception as e:
+                    results[key] = e
+    return results
+
+
+def fetch_stocklake_context(ticker: str, want: Dict[str, Tuple[str, dict]]) -> Dict[str, Any]:
+    """
+    Sync entrypoint for every Stocklake-backed feature in this file — call
+    it once per analyze() request with every tool call you want this time
+    (e.g. {"news": ("get_stock_news", {...}), "earnings": ("get_earnings_calendar", {...})})
+    and get back {key: payload_or_None} for all of them from a single MCP
+    session. A key maps to None if STOCKLAKE_API_KEY isn't configured, the
+    whole session failed outright (e.g. connection refused), or that
+    specific call raised — never raises itself, so a caller can always just
+    check for None and fall back, the same pattern every other optional
+    integration in this file already uses.
+
+    Timeout budget scales with how many calls are requested (up to
+    STOCKLAKE_TIMEOUT_SECONDS per call, sequential within the one session).
+    Deliberately NOT +1 for the handshake on top of that: today's only
+    caller (fetch_sentiment) makes exactly one call, and that single-call
+    case should stay at exactly STOCKLAKE_TIMEOUT_SECONDS worst case — the
+    same tight budget the trade-off note above this section calls out —
+    not silently double it while making room for callers that don't exist
+    yet.
+    """
+    if not want:
+        return {}
+    api_key = os.environ.get("STOCKLAKE_API_KEY")
+    if not api_key:
+        return {key: None for key in want}
+
+    timeout = timedelta(seconds=STOCKLAKE_TIMEOUT_SECONDS)
+    outer_budget = STOCKLAKE_TIMEOUT_SECONDS * len(want)
+    try:
+        results = asyncio.run(
+            asyncio.wait_for(_stocklake_fetch(api_key, want, timeout), timeout=outer_budget)
+        )
+    except Exception as e:
+        logger.info(f"Stocklake session failed for {ticker}: {e}")
+        return {key: None for key in want}
+
+    return {key: (None if isinstance(v, Exception) else v) for key, v in results.items()}
 
 
 def fetch_sentiment(ticker: str) -> SentimentAnalysis:
@@ -1360,18 +1420,14 @@ def fetch_sentiment(ticker: str) -> SentimentAnalysis:
         headlines=[],
     )
 
-    api_key = os.environ.get("STOCKLAKE_API_KEY")
-    if not api_key:
-        return fallback
-
-    try:
-        articles = asyncio.run(
-            asyncio.wait_for(_fetch_stocklake_articles(ticker, api_key), timeout=STOCKLAKE_TIMEOUT_SECONDS)
-        )
-    except Exception as e:
-        logger.info(f"Stocklake news fetch failed for {ticker}, falling back to neutral: {e}")
-        return fallback
-
+    context = fetch_stocklake_context(ticker, {"news": ("get_stock_news", {"symbol": ticker, "days": 14, "limit": 5})})
+    payload = context.get("news")
+    # payload is whatever get_stock_news's JSON happened to decode to — a
+    # dict on the happy path, but fetch_stocklake_context only guarantees
+    # valid JSON, not a particular shape. A malformed/unexpected response
+    # (e.g. a bare list on a Stocklake-side error) degrades the same as a
+    # missing one, rather than raising out of this function.
+    articles = payload.get("articles", []) if isinstance(payload, dict) else []
     if not articles:
         return fallback
 
