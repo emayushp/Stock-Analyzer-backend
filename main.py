@@ -1,11 +1,12 @@
 """
 Stock Market Analysis API
 Technical analysis (RSI + MACD + Volume), volatility-based price targets,
-company fundamentals, and AI news sentiment (FinBERT) for US & Canadian equities.
+company fundamentals, and AI news sentiment (via Stocklake) for US & Canadian equities.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -15,26 +16,24 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
 import numpy as np
 import pandas as pd
-import torch
 import yfinance as yf
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
 import auth as auth_lib
 import db as db_lib
-
-# Fewer threads = less memory overhead from torch's internal thread pool.
-torch.set_num_threads(1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stock-analyzer")
@@ -205,25 +204,6 @@ def cache_set(ticker: str, payload: Dict[str, Any]) -> None:
     if len(_CACHE) > 100:
         oldest = min(_CACHE.items(), key=lambda kv: kv[1][0])[0]
         _CACHE.pop(oldest, None)
-
-
-_sentiment_pipeline = None
-
-
-@app.on_event("startup")
-def load_model():
-    global _sentiment_pipeline
-    logger.info("Loading FinBERT model (ProsusAI/finbert)... this can take a moment.")
-
-    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-
-    # int8 dynamic quantization keeps the resident memory footprint small.
-    model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-    model.eval()
-
-    _sentiment_pipeline = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
-    logger.info("FinBERT loaded (quantized).")
 
 
 # ---------------------------------------------------------------------------
@@ -1311,131 +1291,123 @@ def build_fundamentals(info: dict, current_price: Optional[float]) -> Fundamenta
 
 
 # ---------------------------------------------------------------------------
-# Headline "why it matters" tagging
+# News sentiment via Stocklake
 #
-# Honest caveat about how this works: FinBERT gives sentiment (positive /
-# negative / neutral), not an understanding of WHY a headline matters. Rather
-# than pretend otherwise, this matches common, well-understood financial-news
-# patterns (earnings beats, guidance cuts, layoffs, M&A, etc.) and explains
-# those specifically. Headlines that don't match a pattern fall back to a
-# sentiment-based explanation — genuinely less specific, and labeled as such.
+# Used to run a local FinBERT model (torch + transformers — the single
+# heaviest thing in this app's deploy image) over yfinance headlines, with
+# a hand-rolled regex table guessing WHY each headline mattered. Replaced
+# with one call to Stocklake's AI news pipeline (get_stock_news): it fetches
+# the news itself, and each article already carries a real sentiment label
+# and a generated summary explaining the story — no local inference, no
+# pattern-matching guesswork standing in for an actual explanation.
+#
+# Stocklake is an MCP server, not a plain REST API — there's no bare HTTP
+# endpoint to hit, so this speaks the MCP protocol directly (initialize,
+# then a single tools/call) using the official SDK. That's a real per-call
+# cost (a fresh session handshake every time, not just a GET), so this
+# degrades exactly like every other optional integration in this file:
+# missing key, timeout, or any failure at all -> the same neutral
+# placeholder that used to mean "no headlines," never a broken Analyze page.
+#
+# Known trade-off, not (yet) fixed: unlike the old local FinBERT call, this
+# runs synchronously on analyze()'s own request thread — a slow-but-not-
+# failing Stocklake response can occupy one of this app's worker threads
+# for close to the full timeout below. The AI Decision feature hit this
+# same shape of problem (a slow external AI call blocking the fast, already-
+# computed rest of the page) and was split into its own endpoint
+# specifically to avoid it — see analyze_decision()'s own docstring. The
+# same treatment would fix this properly; not done here since it changes
+# the response shape and the frontend's loading state, which is more than
+# a like-for-like swap. The timeout below is kept deliberately tight as a
+# partial mitigation in the meantime.
 # ---------------------------------------------------------------------------
-HEADLINE_PATTERNS = [
-    (r"\bbeat[s]?\b.{0,20}\bestimate|exceed[s]?.{0,20}expectation", "positive",
-     "Earnings or revenue came in above what analysts expected — often supports the price short-term."),
-    (r"\bmiss(?:es|ed)?\b.{0,20}\bestimate|below.{0,20}expectation|fell short", "negative",
-     "Results came in below analyst expectations — often pressures the price short-term."),
-    (r"\braises?\b.{0,20}\bguidance|\bguidance\b.{0,20}\braise|upgrad", "positive",
-     "The company or an analyst raised expectations for future performance."),
-    (r"\bcuts?\b.{0,20}\bguidance|\blowers?\b.{0,20}\bguidance|downgrad|slash", "negative",
-     "Guidance was lowered or an analyst downgraded outlook — signals reduced confidence ahead."),
-    (r"\blayoff|\bjob cuts|\brestructur", "negative",
-     "Workforce reductions often signal cost pressure, though markets sometimes read this as improved efficiency."),
-    (r"\bacqui(?:re|sition)|\bmerger|\bbuyout|\btakeover", "neutral",
-     "M&A activity — impact depends heavily on price paid and strategic fit; can go either way."),
-    (r"\blawsuit|\bsu(?:e|ing|it)\b|\bregulat|\bprobe|\binvestigat|\bfine\b", "negative",
-     "Legal or regulatory scrutiny introduces uncertainty and potential costs."),
-    (r"\brecall\b", "negative",
-     "Product recalls carry direct costs and can dent brand trust."),
-    (r"\bdividend\b.{0,20}\b(?:raise|increase|hike)", "positive",
-     "A dividend increase signals management's confidence in sustained cash flow."),
-    (r"\bdividend\b.{0,20}\b(?:cut|suspend|reduce)", "negative",
-     "A dividend cut often signals real cash-flow strain."),
-    (r"\bprice target\b.{0,20}\braise|\braise[sd]?\b.{0,20}\bprice target", "positive",
-     "An analyst raised their price target — a vote of confidence, though targets are frequently wrong."),
-    (r"\bprice target\b.{0,20}\bcut|\bcut[s]?\b.{0,20}\bprice target|\blower.{0,20}price target", "negative",
-     "An analyst cut their price target — signals reduced confidence, though targets are frequently wrong."),
-    (r"\blaunch|\bunveil|\bnew product", "positive",
-     "New product news can drive near-term attention, though actual sales impact takes longer to show up."),
-]
+STOCKLAKE_MCP_URL = "https://api.stocklake.dev/mcp"
+STOCKLAKE_TIMEOUT_SECONDS = 8
 
-_COMPILED_PATTERNS = [(re.compile(p, re.IGNORECASE), tone, expl) for p, tone, expl in HEADLINE_PATTERNS]
+# Stocklake's ai_sentiment values ("POSITIVE"/"NEGATIVE"/"NEUTRAL"/"mixed",
+# inconsistently cased) collapse onto the three buckets the rest of this
+# app — and the frontend's color lookup — already knows about. "mixed"
+# (genuinely two-sided coverage) reads as neutral for the purposes of the
+# directional bullish_score below, the same as an article with no clear lean.
+_STOCKLAKE_SENTIMENT_MAP = {"positive": "positive", "negative": "negative", "neutral": "neutral", "mixed": "neutral"}
 
 
-def explain_headline(title: str, sentiment: str) -> str:
-    for pattern, _tone, explanation in _COMPILED_PATTERNS:
-        if pattern.search(title):
-            return explanation
-    # No specific pattern matched — fall back to the sentiment reading alone,
-    # and say so, rather than implying a specific reason that isn't there.
-    if sentiment == "positive":
-        return "Reads positive in tone based on the headline's language — read the full article for the specific reason."
-    if sentiment == "negative":
-        return "Reads negative in tone based on the headline's language — read the full article for the specific reason."
-    return "Tone reads as neutral — no strong positive or negative signal from the headline alone."
+async def _fetch_stocklake_articles(ticker: str, api_key: str) -> List[dict]:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = timedelta(seconds=STOCKLAKE_TIMEOUT_SECONDS)
+    async with streamablehttp_client(STOCKLAKE_MCP_URL, headers=headers, timeout=timeout) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "get_stock_news",
+                {"symbol": ticker, "days": 14, "limit": 5},
+                read_timeout_seconds=timeout,
+            )
+            if result.isError:
+                raise RuntimeError(f"Stocklake get_stock_news returned an error for {ticker}")
+            for block in result.content:
+                if isinstance(block, TextContent):
+                    payload = json.loads(block.text)
+                    return payload.get("articles", [])
+            return []
 
 
-def extract_headline(item: dict) -> Optional[dict]:
-    """yfinance's news schema has changed across versions — handle both shapes."""
-    if "content" in item and isinstance(item["content"], dict):
-        content = item["content"]
-        title = content.get("title")
-        publisher = (content.get("provider") or {}).get("displayName")
-        link = (content.get("canonicalUrl") or {}).get("url") or (
-            content.get("clickThroughUrl") or {}
-        ).get("url")
-        if title:
-            return {"title": title, "publisher": publisher, "link": link}
+def fetch_sentiment(ticker: str) -> SentimentAnalysis:
+    fallback = SentimentAnalysis(
+        bullish_score=0.5,
+        overall_impact="Neutral (no recent news available)",
+        headline_count=0,
+        headlines=[],
+    )
 
-    title = item.get("title")
-    if title:
-        return {"title": title, "publisher": item.get("publisher"), "link": item.get("link")}
-    return None
+    api_key = os.environ.get("STOCKLAKE_API_KEY")
+    if not api_key:
+        return fallback
 
-
-def fetch_headlines(stock: yf.Ticker, limit: int = 5) -> List[dict]:
     try:
-        raw_news = stock.news or []
-    except Exception as e:
-        logger.warning(f"Could not fetch news: {e}")
-        return []
-
-    headlines = []
-    for item in raw_news:
-        parsed = extract_headline(item)
-        if parsed:
-            headlines.append(parsed)
-        if len(headlines) >= limit:
-            break
-    return headlines
-
-
-def analyze_sentiment(headlines: List[dict]) -> SentimentAnalysis:
-    if not headlines or _sentiment_pipeline is None:
-        return SentimentAnalysis(
-            bullish_score=0.5,
-            overall_impact="Neutral (no recent news available)",
-            headline_count=0,
-            headlines=[],
+        articles = asyncio.run(
+            asyncio.wait_for(_fetch_stocklake_articles(ticker, api_key), timeout=STOCKLAKE_TIMEOUT_SECONDS)
         )
+    except Exception as e:
+        logger.info(f"Stocklake news fetch failed for {ticker}, falling back to neutral: {e}")
+        return fallback
 
-    titles = [h["title"] for h in headlines]
-    results = _sentiment_pipeline(titles)
+    if not articles:
+        return fallback
 
     scored_headlines = []
     directional_total = 0.0
 
-    for h, r in zip(headlines, results):
-        label = r["label"].lower()
-        score = float(r["score"])
+    for a in articles:
+        raw_sentiment = (a.get("ai_sentiment") or "neutral").strip().lower()
+        sentiment = _STOCKLAKE_SENTIMENT_MAP.get(raw_sentiment, "neutral")
+        # signal_score is Stocklake's own 0-100 "how strong is this idea"
+        # magnitude — used here as the per-article weight, the same role
+        # FinBERT's classification confidence used to play. `or 50.0` would
+        # wrongly treat a genuine, deliberate 0 the same as "missing" (0.0
+        # is falsy in Python) — signal_score can legitimately be exactly 0,
+        # per Stocklake's own docs, so only a true null/absent value should
+        # fall back to the neutral 50 default.
+        raw_score = a.get("signal_score")
+        magnitude = (raw_score if raw_score is not None else 50.0) / 100.0
 
-        if label == "positive":
-            directional_total += score
-        elif label == "negative":
-            directional_total -= score
+        if sentiment == "positive":
+            directional_total += magnitude
+        elif sentiment == "negative":
+            directional_total -= magnitude
 
         scored_headlines.append(
             Headline(
-                title=h["title"],
-                publisher=h.get("publisher"),
-                link=h.get("link"),
-                sentiment=label,
-                sentiment_score=round(score, 3),
-                context=explain_headline(h["title"], label),
+                title=a.get("title") or "",
+                publisher=None,
+                link=None,
+                sentiment=sentiment,
+                sentiment_score=round(magnitude, 3),
+                context=a.get("ai_summary") or "",
             )
         )
 
-    avg_directional = directional_total / len(headlines)
+    avg_directional = directional_total / len(articles)
     bullish_score = round((avg_directional + 1) / 2, 3)
 
     if bullish_score > 0.6:
@@ -2049,7 +2021,7 @@ def root():
 def health():
     return {
         "status": "healthy",
-        "model_loaded": _sentiment_pipeline is not None,
+        "sentiment_source_configured": bool(os.environ.get("STOCKLAKE_API_KEY")),
         "cached_tickers": len(_CACHE),
     }
 
@@ -2404,8 +2376,7 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
 
-    headlines = fetch_headlines(stock, limit=5)
-    sentiment = analyze_sentiment(headlines)
+    sentiment = fetch_sentiment(ticker)
 
     response = AnalysisResponse(
         ticker=ticker,

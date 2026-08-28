@@ -2,8 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 yfinance==1.6.0
 pandas==2.2.2
-transformers==4.44.2
-torch==2.4.1
+mcp==1.9.0
 pydantic==2.9.2
 anthropic==0.122.0
 sqlalchemy==2.0.35
