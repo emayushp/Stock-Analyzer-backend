@@ -1232,6 +1232,20 @@ function Analyze({state, dispatch}) {
               {h.context && <div className="ctx">{h.context}</div>}
             </div>)}
           </div>
+
+          {data.insider_activity && <div className="card">
+            <h2>Insider &amp; Institutional Activity</h2>
+            {data.insider_activity.signal && <span className="mini" style={{
+              color:SENT[(data.insider_activity.signal||"").toLowerCase()]||"var(--muted)",
+              borderColor:"transparent",
+              background:(SENT[(data.insider_activity.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+              textTransform:"uppercase"}}>{data.insider_activity.signal}</span>}
+            <Row l="Insider transactions" v={`${data.insider_activity.insider_buys ?? 0} buys · ${data.insider_activity.insider_sells ?? 0} sells`}/>
+            {data.insider_activity.institutional_ownership_pct!=null && <Row l="Institutional ownership" v={`${data.insider_activity.institutional_ownership_pct}%`}/>}
+            {data.insider_activity.total_holders!=null && <Row l="Institutional holders" v={data.insider_activity.total_holders}/>}
+            {data.insider_activity.summary && <p className="plain" style={{marginTop:12}}>{data.insider_activity.summary}</p>}
+            <p className="note">Informational only — SEC Form 4 + institutional-holdings data via Stocklake. Not currently factored into the signal above.</p>
+          </div>}
         </div>
       </div>
 

@@ -320,6 +320,28 @@ class MarketRegime(BaseModel):
     note: str
 
 
+class InsiderActivity(BaseModel):
+    """
+    Display-only context from Stocklake's get_insider_activity — SEC Form 4
+    insider transactions plus institutional-holdings flow. Deliberately NOT
+    a conviction modifier: unlike the five that are (track record, quality,
+    regime, divergence, earnings), this has never been run through the
+    backtest harness, so there's no evidence yet that it should move
+    conviction one way or the other. See DECISION_LOGIC.md §16 on why the
+    app doesn't wire new signals into the live conviction on intuition alone.
+    """
+    signal: Optional[str] = None
+    signal_score: Optional[float] = None
+    signal_score_band: Optional[str] = None
+    insider_signal: Optional[str] = None
+    institutional_signal: Optional[str] = None
+    summary: Optional[str] = None
+    insider_buys: Optional[int] = None
+    insider_sells: Optional[int] = None
+    institutional_ownership_pct: Optional[float] = None
+    total_holders: Optional[int] = None
+
+
 class AnalysisResponse(BaseModel):
     ticker: str
     company_name: str
@@ -337,6 +359,7 @@ class AnalysisResponse(BaseModel):
     technical_analysis: TechnicalAnalysis
     price_targets: PriceTargets
     sentiment_analysis: SentimentAnalysis
+    insider_activity: Optional[InsiderActivity] = None
     generated_at: str
     cached: bool = False
 
@@ -1633,6 +1656,32 @@ def _merge_stocklake_fundamentals(info: dict, stocklake_data: Optional[dict]) ->
     return merged
 
 
+def map_insider_activity(payload: Any, symbol_validated: bool) -> Optional[InsiderActivity]:
+    """
+    Maps an already-fetched get_insider_activity() response into the app's
+    own model. `symbol_validated` should be whether validate_stocklake_stock
+    passed for this same ticker's get_stock() call in the same shared
+    session — get_insider_activity is looked up by the same
+    (possibly-suffix-stripped) symbol, so it carries the same wrong-company
+    substitution risk that validator already checked for the stock call;
+    reusing that result here avoids running an equivalent check twice.
+    """
+    if not symbol_validated or not isinstance(payload, dict) or "error" in payload:
+        return None
+    return InsiderActivity(
+        signal=payload.get("signal"),
+        signal_score=payload.get("signal_score"),
+        signal_score_band=payload.get("signal_score_band"),
+        insider_signal=payload.get("insider_signal"),
+        institutional_signal=payload.get("inst_signal"),
+        summary=payload.get("summary"),
+        insider_buys=payload.get("insider_buys"),
+        insider_sells=payload.get("insider_sells"),
+        institutional_ownership_pct=payload.get("inst_ownership"),
+        total_holders=payload.get("total_holders"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Batched multi-ticker scoring
 #
@@ -2521,11 +2570,13 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
     stocklake_context = fetch_stocklake_context(ticker, {
         "stock": ("get_stock", {"symbol": stocklake_symbol}),
         "news": ("get_stock_news", {"symbol": ticker, "days": 14, "limit": 5}),
+        "insider": ("get_insider_activity", {"symbol": stocklake_symbol}),
     })
     stocklake_stock_data = validate_stocklake_stock(
         ticker, stocklake_symbol, stocklake_context.get("stock"),
         yf_name=info.get("longName") or info.get("shortName") or "",
     )
+    insider_activity = map_insider_activity(stocklake_context.get("insider"), stocklake_stock_data is not None)
 
     fundamentals = build_fundamentals(info, current_price)
     quality = compute_quality_score(_merge_stocklake_fundamentals(info, stocklake_stock_data))
@@ -2619,6 +2670,7 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
         technical_analysis=technical,
         price_targets=price_targets,
         sentiment_analysis=sentiment,
+        insider_activity=insider_activity,
         generated_at=datetime.now(timezone.utc).isoformat(),
         cached=False,
     )
