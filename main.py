@@ -1175,26 +1175,57 @@ def apply_regime_check(technical: TechnicalAnalysis, regime: "MarketRegime") -> 
     return technical
 
 
-def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
+def fetch_earnings(
+    stock: yf.Ticker, ticker: str, stocklake_data: Optional[dict] = None
+) -> EarningsInfo:
     """
     Next earnings date plus the last few quarters' EPS estimate vs. actual.
     Coverage varies a lot by ticker — especially thinner for smaller Canadian
     names — so this degrades gracefully to "not available" rather than error.
 
-    Deliberately NOT using yfinance's get_earnings_dates(): that method HTML-
-    scrapes Yahoo's calendar page, which yfinance's own source notes Yahoo
-    stopped keeping current ("reverting to scraping HTML" after the proper
-    endpoint broke) — in practice it was returning nothing for most tickers,
-    well-covered large-caps included. `calendar` and `get_earnings_history()`
-    hit Yahoo's quoteSummary JSON API instead, same as fundamentals/info
-    elsewhere in this file, and are far more reliable.
+    The next-earnings-date half now prefers Stocklake's get_stock() response
+    (pre-fetched once by analyze() and passed in as `stocklake_data`, shared
+    with compute_quality_score's fundamentals — see fetch_stocklake_stock)
+    over yfinance's own calendar, since that yfinance path has a known
+    reliability problem: it HTML-scrapes Yahoo's calendar page, which
+    yfinance's own source notes Yahoo stopped keeping current ("reverting to
+    scraping HTML" after the proper endpoint broke) — in practice it was
+    returning nothing for most tickers, well-covered large-caps included.
+    yfinance's `calendar` still runs as the fallback whenever Stocklake
+    doesn't have this ticker (a real, common case — confirmed live even
+    some well-known large-caps aren't in Stocklake's ~3,500-symbol
+    universe) or has no earnings_date on it.
+
+    recent_quarters (historical EPS actual-vs-estimate) has no Stocklake
+    equivalent — Stocklake's earnings data is calendar/forward-looking
+    only — so that half is always yfinance's get_earnings_history(),
+    unchanged. yfinance's `calendar`/`get_earnings_history()` both hit
+    Yahoo's quoteSummary JSON API, same as fundamentals/info elsewhere in
+    this file, and are far more reliable than the scraped alternative.
     """
     fallback = EarningsInfo(
         next_earnings_date=None, recent_quarters=[],
         note="Earnings data isn't available for this ticker.",
     )
 
-    def fetch_next_date():
+    next_date = None
+    if stocklake_data and stocklake_data.get("earnings_date"):
+        try:
+            parsed = datetime.fromisoformat(stocklake_data["earnings_date"])
+            # Every live response observed so far uses a +00:00 offset, but
+            # nothing guarantees that always holds — normalize to UTC (and
+            # treat a naive timestamp as already UTC) before taking .date(),
+            # so a non-UTC offset can't shift the calendar date by a day in
+            # either direction right around midnight.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed_date = parsed.astimezone(timezone.utc).date()
+            if parsed_date >= datetime.now(timezone.utc).date():
+                next_date = parsed_date.strftime("%Y-%m-%d")
+        except Exception as e:
+            logger.info(f"Couldn't parse Stocklake earnings_date for {ticker}: {e}")
+
+    def fetch_next_date_yf():
         cal = stock.calendar or {}
         # yfinance builds these dates with datetime.fromtimestamp() (naive,
         # server-local time) — compare against a local-time "today" too,
@@ -1224,18 +1255,19 @@ def fetch_earnings(stock: yf.Ticker) -> EarningsInfo:
             )
         return result
 
-    next_date = None
     quarters = []
     # Two independent quoteSummary round trips — run concurrently rather than
     # doubling this function's latency, matching the pattern already used
-    # for the high-volume screener's US/CA fetches.
+    # for the high-volume screener's US/CA fetches. The date fetch is only
+    # submitted at all when Stocklake didn't already supply one.
     with ThreadPoolExecutor(max_workers=2) as pool:
-        date_future = pool.submit(fetch_next_date)
+        date_future = None if next_date is not None else pool.submit(fetch_next_date_yf)
         quarters_future = pool.submit(fetch_quarters)
-        try:
-            next_date = date_future.result()
-        except Exception as e:
-            logger.info(f"Earnings calendar fetch failed: {e}")
+        if date_future is not None:
+            try:
+                next_date = date_future.result()
+            except Exception as e:
+                logger.info(f"Earnings calendar fetch failed: {e}")
         try:
             quarters = quarters_future.result()
         except Exception as e:
@@ -1412,7 +1444,16 @@ def fetch_stocklake_context(ticker: str, want: Dict[str, Tuple[str, dict]]) -> D
     return {key: (None if isinstance(v, Exception) else v) for key, v in results.items()}
 
 
-def fetch_sentiment(ticker: str) -> SentimentAnalysis:
+def fetch_sentiment(payload: Any) -> SentimentAnalysis:
+    """
+    Pure mapping — takes whatever get_stock_news already returned (via
+    analyze()'s single combined Stocklake call, see the "stock" + "news"
+    fetch_stocklake_context call there), rather than fetching it itself.
+    This used to open its own dedicated MCP session; now it shares the one
+    session analyze() opens for the "stock" (earnings/fundamentals) call
+    too — the whole reason fetch_stocklake_context/_stocklake_fetch exist
+    is to pay that handshake cost once per request, not once per feature.
+    """
     fallback = SentimentAnalysis(
         bullish_score=0.5,
         overall_impact="Neutral (no recent news available)",
@@ -1420,13 +1461,12 @@ def fetch_sentiment(ticker: str) -> SentimentAnalysis:
         headlines=[],
     )
 
-    context = fetch_stocklake_context(ticker, {"news": ("get_stock_news", {"symbol": ticker, "days": 14, "limit": 5})})
-    payload = context.get("news")
     # payload is whatever get_stock_news's JSON happened to decode to — a
     # dict on the happy path, but fetch_stocklake_context only guarantees
-    # valid JSON, not a particular shape. A malformed/unexpected response
-    # (e.g. a bare list on a Stocklake-side error) degrades the same as a
-    # missing one, rather than raising out of this function.
+    # valid JSON, not a particular shape (or that the key was even present,
+    # if STOCKLAKE_API_KEY isn't configured or the session failed). A
+    # malformed/missing response degrades the same as no news at all,
+    # rather than raising out of this function.
     articles = payload.get("articles", []) if isinstance(payload, dict) else []
     if not articles:
         return fallback
@@ -1479,6 +1519,118 @@ def fetch_sentiment(ticker: str) -> SentimentAnalysis:
         headline_count=len(scored_headlines),
         headlines=scored_headlines,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stocklake's per-symbol get_stock — one call, two consumers below
+# (fetch_earnings's next_earnings_date, compute_quality_score's
+# fundamentals) via analyze()'s own shared fetch, so this only runs once
+# per request rather than once per consumer.
+# ---------------------------------------------------------------------------
+_STOCKLAKE_CA_SUFFIXES = (".TO", ".V", ".CN", ".NE")
+
+
+def _stocklake_symbol(ticker: str) -> str:
+    """
+    Stocklake's universe doesn't recognize this app's Canadian exchange
+    suffixes — verified live: get_stock("SHOP.TO") 404s, get_stock("SHOP")
+    correctly resolves to Shopify's primary listing. Stripping the suffix
+    is only safe when paired with the country check in fetch_stocklake_stock
+    below — a bare symbol can just as easily collide with an unrelated
+    company that happens to share the same letters.
+    """
+    for suffix in _STOCKLAKE_CA_SUFFIXES:
+        if ticker.endswith(suffix):
+            return ticker[: -len(suffix)]
+    return ticker
+
+
+def validate_stocklake_stock(ticker: str, symbol: str, data: Any, yf_name: str = "") -> Optional[dict]:
+    """
+    Pure validator for an already-fetched get_stock() response (see
+    analyze()'s single combined Stocklake call — this used to fetch its
+    own data via a second, independent MCP session, which defeated the
+    entire point of sharing one session per request with the news call).
+
+    Fails closed on Stocklake's own no-data response: get_stock embeds
+    "not found" as a normal {"error": {...}} payload rather than an MCP-
+    level error (confirmed live — even well-known tickers aren't always in
+    Stocklake's ~3,500-symbol universe), so that shape is checked for
+    explicitly rather than trusting any dict-shaped response.
+
+    Fails closed on a stripped-suffix lookup, with two independent checks
+    since neither alone is conclusive: if get_stock("SHOP") resolves for a
+    ticker requested as "SHOP.TO", (1) the response's own `country` field
+    must say "Canada" (confirmed live against SHOP's real data), and (2)
+    when a yfinance company name is available for cross-check, it must
+    share at least one significant word with Stocklake's own `name` field
+    — a same-country company that happens to share the stripped ticker
+    letters (a real, if narrow, residual risk once the suffix is dropped)
+    is still caught by the name mismatch even though the country matches.
+    Either check failing treats the lookup as not found rather than
+    risking a silent wrong-company substitution.
+    """
+    if not isinstance(data, dict) or "error" in data:
+        return None
+    if symbol == ticker:
+        return data  # no suffix was stripped, so no cross-company risk to check
+
+    if data.get("country") != "Canada":
+        return None
+
+    sl_name = (data.get("name") or "").lower()
+    yf_name_l = (yf_name or "").lower()
+    if yf_name_l and sl_name:
+        strip = str.maketrans("", "", ".,")
+        yf_words = {w for w in yf_name_l.translate(strip).split() if len(w) > 2}
+        sl_words = {w for w in sl_name.translate(strip).split() if len(w) > 2}
+        if yf_words and sl_words and not (yf_words & sl_words):
+            return None
+    return data
+
+
+def _merge_stocklake_fundamentals(info: dict, stocklake_data: Optional[dict]) -> dict:
+    """
+    yfinance's `info` dict is what compute_quality_score was built against
+    (and what build_fundamentals also reads), but it's inconsistently
+    populated across tickers. This fills in ONLY the specific fields
+    compute_quality_score needs when yfinance's own value is missing, from
+    an already-fetched Stocklake get_stock() response (see
+    fetch_stocklake_stock) — never overrides a real yfinance value that's
+    already present, only patches genuine gaps.
+
+    debt_to_equity needs a unit conversion: yfinance expresses it as
+    already-scaled percentage points (e.g. 45.3 meaning 45.3%), Stocklake
+    as a plain ratio (e.g. 1.403 meaning 140.3%) — confirmed live against
+    SHOP's real data. Multiplying by 100 aligns it to the scale
+    compute_quality_score's own thresholds (< 50, < 150) are calibrated
+    for; profit margin, ROE, and revenue growth are already expressed as
+    the same 0-1 fraction convention on both sides, so those pass through
+    unconverted.
+
+    A negative debt_to_equity is excluded rather than converted and merged:
+    it means negative shareholder equity (a distress signal — accumulated
+    deficits or heavy buybacks), but compute_quality_score's `d2e < 50`
+    branch would score any negative number as "Low debt" and award full
+    points, rewarding the exact pattern it's meant to penalize. Leaving it
+    unfilled scores that factor the same as if it were simply unavailable,
+    rather than feeding the scorer a number it would misread.
+    """
+    if not stocklake_data:
+        return info
+    merged = dict(info)
+    field_map = {
+        "profitMargins": "profit_margins",
+        "returnOnEquity": "return_on_equity",
+        "revenueGrowth": "revenue_growth",
+    }
+    for yf_key, sl_key in field_map.items():
+        if merged.get(yf_key) is None and stocklake_data.get(sl_key) is not None:
+            merged[yf_key] = stocklake_data[sl_key]
+    d2e = stocklake_data.get("debt_to_equity")
+    if merged.get("debtToEquity") is None and d2e is not None and d2e >= 0:
+        merged["debtToEquity"] = d2e * 100
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -2359,8 +2511,24 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
 
     price_history = [round(float(v), 2) for v in close.tail(30).tolist()]
 
+    # One combined Stocklake session for this whole request — get_stock()
+    # (reused below by both the quality score's fundamentals and, further
+    # down, fetch_earnings's next-earnings-date) and get_stock_news()
+    # (reused by fetch_sentiment, further down still) — rather than each
+    # feature opening its own MCP session. See fetch_stocklake_context's
+    # own docstring for why paying the handshake once per request matters.
+    stocklake_symbol = _stocklake_symbol(ticker)
+    stocklake_context = fetch_stocklake_context(ticker, {
+        "stock": ("get_stock", {"symbol": stocklake_symbol}),
+        "news": ("get_stock_news", {"symbol": ticker, "days": 14, "limit": 5}),
+    })
+    stocklake_stock_data = validate_stocklake_stock(
+        ticker, stocklake_symbol, stocklake_context.get("stock"),
+        yf_name=info.get("longName") or info.get("shortName") or "",
+    )
+
     fundamentals = build_fundamentals(info, current_price)
-    quality = compute_quality_score(info)
+    quality = compute_quality_score(_merge_stocklake_fundamentals(info, stocklake_stock_data))
     data_quality = assess_data_quality(ticker, hist, info)
 
     # For a CAD-hedged / CDR product, try to substitute a reliable signal from
@@ -2428,11 +2596,11 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
     regime = get_market_regime(canadian=ticker.endswith((".TO", ".V", ".CN", ".NE")))
     technical = apply_regime_check(technical, regime)
 
-    earnings = fetch_earnings(stock)
+    earnings = fetch_earnings(stock, ticker, stocklake_stock_data)
     technical = apply_earnings_proximity(technical, earnings)
     price_targets = compute_price_targets(hist, technical.signal, current_price)
 
-    sentiment = fetch_sentiment(ticker)
+    sentiment = fetch_sentiment(stocklake_context.get("news"))
 
     response = AnalysisResponse(
         ticker=ticker,
