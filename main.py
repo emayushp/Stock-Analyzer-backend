@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1898,6 +1899,10 @@ def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     }
 
 
+BATCH_DOWNLOAD_TIMEOUT_SECONDS = 30
+SINGLE_TICKER_RETRY_TIMEOUT_SECONDS = 15
+
+
 def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     tickers = [t.strip().upper() for t in tickers if t and t.strip()]
     if not tickers:
@@ -1905,8 +1910,20 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
 
     results: Dict[str, Dict[str, Any]] = {}
 
+    # yf.download()'s own per-request timeout only bounds a single HTTP
+    # call — when Yahoo stalls instead of erroring (seen in production as
+    # rate-limit/crumb failures around the same window), yfinance's internal
+    # retries can still sit well past that. Wrapping it in its own executor
+    # with a hard wall-clock cap turns a request that would otherwise hang
+    # indefinitely (worst for /api/digest, which calls this up to 4x in one
+    # HTTP request) into a fast, clear per-ticker error instead. Deliberately
+    # NOT a `with ThreadPoolExecutor(...) as guard:` block — that waits for
+    # the submitted task to finish on exit regardless of whether .result()
+    # already timed out, which would silently undo the timeout entirely.
+    guard = ThreadPoolExecutor(max_workers=1)
     try:
-        raw = yf.download(
+        raw = guard.submit(
+            yf.download,
             tickers,
             period="6mo",
             interval="1d",
@@ -1914,10 +1931,15 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
             group_by="ticker",
             progress=False,
             threads=True,
-        )
+        ).result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS)
+    except FuturesTimeoutError:
+        logger.error(f"Batch download timed out after {BATCH_DOWNLOAD_TIMEOUT_SECONDS}s for {len(tickers)} tickers")
+        return {t: {"error": "Market data is slow to respond right now — try again shortly."} for t in tickers}
     except Exception as e:
         logger.error(f"Batch download failed: {e}")
         return {t: {"error": "Could not fetch market data."} for t in tickers}
+    finally:
+        guard.shutdown(wait=False)
 
     if raw is None or raw.empty:
         return {t: {"error": "No market data returned."} for t in tickers}
@@ -1952,16 +1974,24 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         return _score_history(t, hist)
 
     if failed:
-        with ThreadPoolExecutor(max_workers=min(len(failed), 8)) as pool:
+        # Same reasoning as the guard above: a plain `with ... as pool:`
+        # blocks on exit until every submitted future finishes, which would
+        # silently cancel out the per-future timeout below the moment one
+        # retry stalls. shutdown(wait=False) lets the function return as
+        # soon as the last non-stalled future is collected.
+        pool = ThreadPoolExecutor(max_workers=min(len(failed), 8))
+        try:
             future_to_ticker = {pool.submit(retry_one, t): t for t in failed}
             for future in future_to_ticker:
                 t = future_to_ticker[future]
                 try:
-                    scored = future.result()
+                    scored = future.result(timeout=SINGLE_TICKER_RETRY_TIMEOUT_SECONDS)
                     if scored is not None:
                         results[t] = scored
                 except Exception as e:
                     logger.info(f"Single-ticker retry failed for {t}: {e}")
+        finally:
+            pool.shutdown(wait=False)
 
     return results
 
