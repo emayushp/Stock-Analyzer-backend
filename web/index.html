@@ -1658,15 +1658,22 @@ function Brief({state, dispatch}) {
   const [showAllSells,setShowAllSells] = useState(false);
   const [addingScan,setAddingScan] = useState(false);
   const [scanInput,setScanInput] = useState("");
+  const loadingRef = useRef(false);
 
   const load = useCallback(async (force)=>{
+    // Guard against overlapping calls — a slow /api/digest plus a remount
+    // (tab switch) or a second Refresh click before the first resolves
+    // would otherwise pile up multiple concurrent scans against the same
+    // backend, making a slow response even slower.
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     force ? setRefreshing(true) : setBusy(true); setErr(null);
     try {
       setD(await api(`/api/digest${force?"?force=true":""}`,{method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({holdings,watchlist,extra_scan_tickers:scanTickers})}));
       setShowAllBuys(false); setShowAllSells(false);
-    } catch(e){ setErr(e.message); } finally { setBusy(false); setRefreshing(false); }
+    } catch(e){ setErr(e.message); } finally { setBusy(false); setRefreshing(false); loadingRef.current = false; }
   },[holdings,watchlist,scanTickers]);
 
   useEffect(()=>{ load(); /* eslint-disable-next-line */ },[scanTickers]);
@@ -1710,7 +1717,7 @@ function Brief({state, dispatch}) {
     <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:10,margin:"28px 0 20px"}}>
       <div style={{flex:1}}><h1>Morning Brief</h1>
         <div className="tag" style={{marginTop:3}}>Portfolio · watchlist · opportunities</div></div>
-      <button className="btn sm ghost" onClick={()=>load(false)}>Refresh</button>
+      <button className="btn sm ghost" disabled={busy||refreshing} onClick={()=>load(false)}>{refreshing?"Refreshing…":"Refresh"}</button>
     </div>
     {busy && <Spin t="Scanning markets…"/>}
     {err && <div className="err"><b>Couldn't load brief</b>{err}</div>}
