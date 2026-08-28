@@ -1861,18 +1861,28 @@ def map_insider_activity(payload: Any, symbol_validated: bool) -> Optional[Insid
     """
     if not symbol_validated or not isinstance(payload, dict) or "error" in payload:
         return None
-    return InsiderActivity(
-        signal=payload.get("signal"),
-        signal_score=payload.get("signal_score"),
-        signal_score_band=payload.get("signal_score_band"),
-        insider_signal=payload.get("insider_signal"),
-        institutional_signal=payload.get("inst_signal"),
-        summary=payload.get("summary"),
-        insider_buys=payload.get("insider_buys"),
-        insider_sells=payload.get("insider_sells"),
-        institutional_ownership_pct=payload.get("inst_ownership"),
-        total_holders=payload.get("total_holders"),
-    )
+    # Constructing the model validates every field — a value of a shape
+    # this app hasn't seen before (e.g. a field typed as a number coming
+    # back as text) would otherwise raise uncaught here, and every caller
+    # of this function (analyze() included) would surface that as a raw
+    # 500 instead of the graceful "no insider data" this already degrades
+    # to for a missing/errored payload just above.
+    try:
+        return InsiderActivity(
+            signal=payload.get("signal"),
+            signal_score=payload.get("signal_score"),
+            signal_score_band=payload.get("signal_score_band"),
+            insider_signal=payload.get("insider_signal"),
+            institutional_signal=payload.get("inst_signal"),
+            summary=payload.get("summary"),
+            insider_buys=payload.get("insider_buys"),
+            insider_sells=payload.get("insider_sells"),
+            institutional_ownership_pct=payload.get("inst_ownership"),
+            total_holders=payload.get("total_holders"),
+        )
+    except Exception as e:
+        logger.info(f"Couldn't map insider activity payload: {e}")
+        return None
 
 
 def map_analyst_consensus(stocklake_data: Optional[dict]) -> Optional[AnalystConsensus]:
@@ -1891,12 +1901,16 @@ def map_analyst_consensus(stocklake_data: Optional[dict]) -> Optional[AnalystCon
         for k in ("analyst_rating", "analyst_target", "analyst_count")
     ):
         return None
-    return AnalystConsensus(
-        rating=stocklake_data.get("analyst_rating"),
-        rating_score=stocklake_data.get("analyst_rating_score"),
-        target=stocklake_data.get("analyst_target"),
-        analyst_count=stocklake_data.get("analyst_count"),
-    )
+    try:
+        return AnalystConsensus(
+            rating=stocklake_data.get("analyst_rating"),
+            rating_score=stocklake_data.get("analyst_rating_score"),
+            target=stocklake_data.get("analyst_target"),
+            analyst_count=stocklake_data.get("analyst_count"),
+        )
+    except Exception as e:
+        logger.info(f"Couldn't map analyst consensus payload: {e}")
+        return None
 
 
 # yfinance's `info["sector"]` doesn't use the same names as Stocklake's
@@ -1920,21 +1934,33 @@ def map_sector_intelligence(payload: Any, sector_name: Optional[str]) -> Optiona
     data as another's)."""
     if not sector_name or not isinstance(payload, dict) or "error" in payload:
         return None
-    if payload.get("sector") and payload["sector"].lower() != sector_name.lower():
+    # Wrapped broadly, not just around the model construction: a "sector"
+    # field of an unexpected type (not a string) would raise on .lower()
+    # below before construction is even reached. Any failure here means
+    # "couldn't map this sector's data," same degrade as a missing/errored
+    # payload above — never an uncaught exception surfacing as a raw 500
+    # in analyze() or the sector-rotation dashboard.
+    try:
+        if payload.get("sector") and payload["sector"].lower() != sector_name.lower():
+            return None
+        stats = payload.get("stats") or {}
+        if not isinstance(stats, dict):
+            stats = {}
+        return SectorIntelligence(
+            sector=payload.get("sector") or sector_name,
+            signal=payload.get("signal"),
+            cycle_stage=payload.get("cycle_stage"),
+            rotation_signal=payload.get("rotation_signal"),
+            drivers=payload.get("drivers"),
+            alert=payload.get("alert"),
+            confidence=payload.get("confidence"),
+            avg_perf_1w_pct=stats.get("avg_perf_1w_pct"),
+            avg_perf_1m_pct=stats.get("avg_perf_1m_pct"),
+            sma200_breadth_pct=stats.get("sma200_breadth_pct"),
+        )
+    except Exception as e:
+        logger.info(f"Couldn't map sector intelligence payload for {sector_name}: {e}")
         return None
-    stats = payload.get("stats") or {}
-    return SectorIntelligence(
-        sector=payload.get("sector") or sector_name,
-        signal=payload.get("signal"),
-        cycle_stage=payload.get("cycle_stage"),
-        rotation_signal=payload.get("rotation_signal"),
-        drivers=payload.get("drivers"),
-        alert=payload.get("alert"),
-        confidence=payload.get("confidence"),
-        avg_perf_1w_pct=stats.get("avg_perf_1w_pct"),
-        avg_perf_1m_pct=stats.get("avg_perf_1m_pct"),
-        sma200_breadth_pct=stats.get("sma200_breadth_pct"),
-    )
 
 
 # Stocklake's fixed 11-sector (GICS-style) taxonomy — the same list
@@ -3444,21 +3470,43 @@ def market_pulse():
             status_code=503,
             detail="Market pulse isn't available right now — Stocklake may be unconfigured or unreachable.",
         )
-    fear_greed = pulse.get("fear_greed") or {}
-    breadth = pulse.get("breadth") or {}
-    return MarketPulseResponse(
-        vix=pulse.get("vix"),
-        fear_greed_value=fear_greed.get("value"),
-        fear_greed_label=fear_greed.get("description"),
-        breadth_oversold_pct=breadth.get("oversold_pct"),
-        breadth_overbought_pct=breadth.get("overbought_pct"),
-        generated_at=datetime.now(timezone.utc).isoformat(),
-        note=(
-            "Market-wide snapshot via Stocklake — VIX, fear/greed, and the share "
-            "of stocks technically oversold or overbought right now. Refreshed "
-            "roughly hourly; informational only, not tied to any one ticker's signal."
-        ),
-    )
+    # get_market_regime() reads this same payload via plain attribute
+    # assignment on an already-built model, which never validates types —
+    # this endpoint instead constructs MarketPulseResponse directly, which
+    # DOES validate every field, so a shape this app hasn't seen before
+    # (a field of an unexpected type, fear_greed/breadth not being a dict)
+    # would otherwise raise uncaught here and surface as a raw 500 instead
+    # of the graceful degradation every other Stocklake call in this app
+    # gets. Same posture as the rest: an unexpected shape means "unavailable
+    # right now," never a broken response.
+    try:
+        fear_greed = pulse.get("fear_greed") or {}
+        breadth = pulse.get("breadth") or {}
+        if not isinstance(fear_greed, dict):
+            fear_greed = {}
+        if not isinstance(breadth, dict):
+            breadth = {}
+        return MarketPulseResponse(
+            vix=pulse.get("vix"),
+            fear_greed_value=fear_greed.get("value"),
+            fear_greed_label=fear_greed.get("description"),
+            breadth_oversold_pct=breadth.get("oversold_pct"),
+            breadth_overbought_pct=breadth.get("overbought_pct"),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            note=(
+                "Market-wide snapshot via Stocklake — VIX, fear/greed, and the share "
+                "of stocks technically oversold or overbought right now. Refreshed "
+                "roughly hourly; informational only, not tied to any one ticker's signal."
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Market pulse response construction failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Market pulse isn't available right now — try again shortly.",
+        )
 
 
 @app.post("/api/earnings-calendar", response_model=EarningsCalendarResponse)
