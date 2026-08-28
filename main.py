@@ -320,6 +320,34 @@ class MarketRegime(BaseModel):
     note: str
 
 
+class SectorIntelligence(BaseModel):
+    """
+    Display-only context from Stocklake's get_sector_intelligence — an
+    AI-assessed real-time snapshot per sector (cycle stage, rotation
+    signal, breadth, recent performance), refreshed ~every 4 hours.
+
+    Deliberately NOT a backtest-validated conviction modifier, and — unlike
+    insider activity — genuinely can't become one the same way: Stocklake
+    only exposes up to 3 PRIOR signal states per sector (history_count),
+    nowhere near the 1-5 years of daily history the app's own
+    VARIANT_DEFS/aggregate_variants harness needs to test whether a filter
+    actually has an edge. There's no way to backtest this at all with what
+    Stocklake provides, so it's shown as context only, same tier as news
+    sentiment and insider activity, with no path to graduating into
+    apply_regime_check the way a historically-backtestable signal could.
+    """
+    sector: Optional[str] = None
+    signal: Optional[str] = None
+    cycle_stage: Optional[str] = None
+    rotation_signal: Optional[str] = None
+    drivers: Optional[str] = None
+    alert: Optional[str] = None
+    confidence: Optional[int] = None
+    avg_perf_1w_pct: Optional[float] = None
+    avg_perf_1m_pct: Optional[float] = None
+    sma200_breadth_pct: Optional[float] = None
+
+
 class InsiderActivity(BaseModel):
     """
     Display-only context from Stocklake's get_insider_activity — SEC Form 4
@@ -360,6 +388,7 @@ class AnalysisResponse(BaseModel):
     price_targets: PriceTargets
     sentiment_analysis: SentimentAnalysis
     insider_activity: Optional[InsiderActivity] = None
+    sector_intelligence: Optional[SectorIntelligence] = None
     generated_at: str
     cached: bool = False
 
@@ -1682,6 +1711,44 @@ def map_insider_activity(payload: Any, symbol_validated: bool) -> Optional[Insid
     )
 
 
+# yfinance's `info["sector"]` doesn't use the same names as Stocklake's
+# fixed 11-sector (GICS-style) taxonomy for four of the eleven — the other
+# seven pass through unchanged. Passing the yfinance name straight through
+# for these four would ask Stocklake for a sector name it doesn't have.
+_STOCKLAKE_SECTOR_MAP = {
+    "financial services": "Financials",
+    "consumer cyclical": "Consumer Discretionary",
+    "consumer defensive": "Consumer Staples",
+    "basic materials": "Materials",
+}
+
+
+def map_sector_intelligence(payload: Any, sector_name: Optional[str]) -> Optional[SectorIntelligence]:
+    """Maps an already-fetched get_sector_intelligence() response into the
+    app's own model. Degrades to None on a missing sector name, an error
+    payload, or a response for a different sector than requested (the
+    single-sector call shouldn't ever return a mismatch, but this is a
+    cheap, cheap-to-check guard against silently mislabeling one sector's
+    data as another's)."""
+    if not sector_name or not isinstance(payload, dict) or "error" in payload:
+        return None
+    if payload.get("sector") and payload["sector"].lower() != sector_name.lower():
+        return None
+    stats = payload.get("stats") or {}
+    return SectorIntelligence(
+        sector=payload.get("sector") or sector_name,
+        signal=payload.get("signal"),
+        cycle_stage=payload.get("cycle_stage"),
+        rotation_signal=payload.get("rotation_signal"),
+        drivers=payload.get("drivers"),
+        alert=payload.get("alert"),
+        confidence=payload.get("confidence"),
+        avg_perf_1w_pct=stats.get("avg_perf_1w_pct"),
+        avg_perf_1m_pct=stats.get("avg_perf_1m_pct"),
+        sma200_breadth_pct=stats.get("sma200_breadth_pct"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Batched multi-ticker scoring
 #
@@ -2586,16 +2653,22 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
     # feature opening its own MCP session. See fetch_stocklake_context's
     # own docstring for why paying the handshake once per request matters.
     stocklake_symbol = _stocklake_symbol(ticker)
-    stocklake_context = fetch_stocklake_context(ticker, {
+    yf_sector = info.get("sector")
+    stocklake_sector = _STOCKLAKE_SECTOR_MAP.get((yf_sector or "").lower(), yf_sector)
+    stocklake_calls = {
         "stock": ("get_stock", {"symbol": stocklake_symbol}),
         "news": ("get_stock_news", {"symbol": ticker, "days": 14, "limit": 5}),
         "insider": ("get_insider_activity", {"symbol": stocklake_symbol}),
-    })
+    }
+    if stocklake_sector:
+        stocklake_calls["sector"] = ("get_sector_intelligence", {"sector": stocklake_sector})
+    stocklake_context = fetch_stocklake_context(ticker, stocklake_calls)
     stocklake_stock_data = validate_stocklake_stock(
         ticker, stocklake_symbol, stocklake_context.get("stock"),
         yf_name=info.get("longName") or info.get("shortName") or "",
     )
     insider_activity = map_insider_activity(stocklake_context.get("insider"), stocklake_stock_data is not None)
+    sector_intelligence = map_sector_intelligence(stocklake_context.get("sector"), stocklake_sector)
 
     fundamentals = build_fundamentals(info, current_price)
     quality = compute_quality_score(_merge_stocklake_fundamentals(info, stocklake_stock_data))
@@ -2690,6 +2763,7 @@ def analyze(ticker: str, background_tasks: BackgroundTasks):
         price_targets=price_targets,
         sentiment_analysis=sentiment,
         insider_activity=insider_activity,
+        sector_intelligence=sector_intelligence,
         generated_at=datetime.now(timezone.utc).isoformat(),
         cached=False,
     )

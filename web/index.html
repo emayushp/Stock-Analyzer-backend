@@ -1246,6 +1246,25 @@ function Analyze({state, dispatch}) {
             {data.insider_activity.summary && <p className="plain" style={{marginTop:12}}>{data.insider_activity.summary}</p>}
             <p className="note">Informational only — SEC Form 4 + institutional-holdings data via Stocklake. Not currently factored into the signal above.</p>
           </div>}
+
+          {data.sector_intelligence && <div className="card">
+            <h2>Sector: {data.sector_intelligence.sector}</h2>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+              {data.sector_intelligence.signal && <span className="mini" style={{
+                color:SENT[(data.sector_intelligence.signal||"").toLowerCase()]||"var(--muted)",
+                borderColor:"transparent",
+                background:(SENT[(data.sector_intelligence.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+                textTransform:"uppercase"}}>{data.sector_intelligence.signal}</span>}
+              {data.sector_intelligence.cycle_stage && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{data.sector_intelligence.cycle_stage}</span>}
+              {data.sector_intelligence.rotation_signal && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{data.sector_intelligence.rotation_signal}</span>}
+            </div>
+            {data.sector_intelligence.avg_perf_1w_pct!=null && <Row l="Sector avg. 1-week performance" v={`${data.sector_intelligence.avg_perf_1w_pct}%`}/>}
+            {data.sector_intelligence.avg_perf_1m_pct!=null && <Row l="Sector avg. 1-month performance" v={`${data.sector_intelligence.avg_perf_1m_pct}%`}/>}
+            {data.sector_intelligence.sma200_breadth_pct!=null && <Row l="% of sector above its 200-day avg" v={`${data.sector_intelligence.sma200_breadth_pct}%`}/>}
+            {data.sector_intelligence.drivers && <p className="plain" style={{marginTop:12}}>{data.sector_intelligence.drivers}</p>}
+            {data.sector_intelligence.alert && <p className="note" style={{color:"var(--red)"}}>{data.sector_intelligence.alert}</p>}
+            <p className="note">Informational only — a real-time sector snapshot via Stocklake, refreshed every few hours. Not backtestable (no historical time series available) and not factored into the signal above.</p>
+          </div>}
         </div>
       </div>
 
