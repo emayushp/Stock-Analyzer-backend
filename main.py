@@ -2356,6 +2356,8 @@ def generate_ai_decision(
     earnings: EarningsInfo,
     price_targets: PriceTargets,
     sentiment: SentimentAnalysis,
+    insider: Optional[InsiderActivity] = None,
+    research: Optional[dict] = None,
     held_shares: Optional[float] = None,
     held_cost_basis: Optional[float] = None,
     history: Optional[List[DecisionHistoryEntry]] = None,
@@ -2421,6 +2423,20 @@ def generate_ai_decision(
             ],
         },
     }
+    if insider is not None:
+        # Unlike everything above, this was never folded into
+        # technical.conviction (see InsiderActivity's own docstring on why
+        # — no backtest evidence behind it yet) — genuinely fresh evidence
+        # for the model to weigh on its own, not something to guard against
+        # double-counting.
+        payload["insider_institutional_activity"] = insider.model_dump()
+    if research:
+        # Stocklake's own AI-generated take (get_stock_research) — a second,
+        # independently-produced opinion alongside this model's own
+        # reasoning, not a substitute for it. Only the synthesis piece is
+        # included; the raw indicators/news/signals get_stock_research also
+        # returns are already covered above from this app's own pipeline.
+        payload["independent_ai_research"] = research
     if is_held:
         unrealized_pl_pct = round((current_price - held_cost_basis) / held_cost_basis * 100, 2) \
             if current_price and held_cost_basis else None
@@ -2463,9 +2479,12 @@ def generate_ai_decision(
                 "already computed for the ticker: a technical signal, that exact signal's "
                 "own historical backtest track record on THIS ticker, fundamentals, a "
                 "quality score, the broader market regime, earnings timing, recent news "
-                "sentiment, and the existing mechanical (ATR-based) price targets — no "
-                "information beyond what's in the JSON, and never invent facts, news, or "
-                "numbers not present there.\n\n"
+                "sentiment, and the existing mechanical (ATR-based) price targets — plus, "
+                "when present, insider/institutional trading activity and a second, "
+                "independently-generated AI research take from a different provider "
+                "(Stocklake) for you to weigh against your own reasoning, not defer to. "
+                "No information beyond what's in the JSON, and never invent facts, news, "
+                "or numbers not present there.\n\n"
                 "technical_signal.conviction is not a raw indicator reading — it has already "
                 "been nudged, one notch at a time, by signal_track_record, quality_score, "
                 "market_regime, divergence, and earnings timing: track_record and divergence "
@@ -2735,10 +2754,42 @@ def analyze_decision(ticker: str, request: AIDecisionRequest = AIDecisionRequest
         return AIDecisionResponse(**cached_decision[1])
 
     a = AnalysisResponse(**cached)
+
+    # A fresh Stocklake call, not reused from /api/analyze's own session:
+    # this endpoint runs as its own request (see this function's docstring
+    # on why), so there's no in-flight session left to piggyback on. Only
+    # the ai_summary block is kept — the rest of get_stock_research
+    # duplicates data this app's own pipeline already has above.
+    stocklake_symbol = _stocklake_symbol(a.ticker)
+    research_payload = fetch_stocklake_context(
+        a.ticker, {"research": ("get_stock_research", {"symbol": stocklake_symbol})}
+    ).get("research")
+    research = None
+    if isinstance(research_payload, dict) and "error" not in research_payload:
+        # Same wrong-company risk validate_stocklake_stock guards against
+        # for the main analyze() call: a suffix-stripped symbol can resolve
+        # to an unrelated company that happens to share the same letters.
+        # get_stock_research's own "stock" block doesn't carry the country
+        # field that function checks, so this falls back to the name-overlap
+        # half of that check alone — good enough for "don't hand the model
+        # research about a different company," even if slightly more
+        # conservative than the full check would be.
+        research_name = ((research_payload.get("stock") or {}).get("name") or "").lower()
+        yf_name = (a.company_name or "").lower()
+        name_overlaps = True
+        if stocklake_symbol != a.ticker and research_name and yf_name:
+            strip = str.maketrans("", "", ".,")
+            yf_words = {w for w in yf_name.translate(strip).split() if len(w) > 2}
+            sl_words = {w for w in research_name.translate(strip).split() if len(w) > 2}
+            name_overlaps = bool(yf_words & sl_words) if (yf_words and sl_words) else True
+        if name_overlaps:
+            research = research_payload.get("ai_summary")
+
     decision = generate_ai_decision(
         a.ticker, a.company_name, a.current_price, a.price_change_pct, a.currency,
         a.technical_analysis, a.fundamentals, a.quality, a.data_quality, a.regime,
         a.earnings, a.price_targets, a.sentiment_analysis,
+        insider=a.insider_activity, research=research,
         held_shares=request.shares, held_cost_basis=request.cost_basis,
         history=request.history,
     )
