@@ -2127,8 +2127,56 @@ function ScreenerCard({c, dispatch}) {
   </div>;
 }
 
+function StocklakeHit({c, dispatch}) {
+  return <div className="card" style={{cursor:"pointer",marginBottom:0}}
+    onClick={()=>dispatch({type:"analyze", ticker:c.symbol})}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:9}}><Avatar t={c.symbol}/><b className="num" style={{fontSize:14}}>{c.symbol}</b></div>
+      {c.ai_score!=null && <span className="mini" style={{background:"var(--accentBg,var(--holdBg))",color:"var(--accent)"}}>AI {c.ai_score}{c.ai_score_band?` · ${c.ai_score_band}`:""}</span>}
+    </div>
+    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:19}}>{c.price ?? "—"}</div>
+    {c.change_pct!=null && <div className="num" style={{fontSize:12,fontWeight:700,marginBottom:10,
+      color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)} today</div>}
+    {c.ai_headline && <p className="note" style={{marginTop:0,marginBottom:8}}>{c.ai_headline}</p>}
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5}}>
+      <div><div className="lbl" style={{marginBottom:2}}>RSI</div><b className="num">{c.rsi ?? "—"}</b></div>
+      <div style={{textAlign:"right"}}><div className="lbl" style={{marginBottom:2}}>Analyst</div><b style={{color:"var(--accent)"}}>{c.analyst_rating ?? "—"}</b></div>
+    </div>
+  </div>;
+}
+
+const STOCKLAKE_PRESETS = [["high_conviction","High Conviction"],["momentum","Momentum"],["oversold","Oversold"],["overbought","Overbought"]];
+
+function StocklakeScreener({dispatch}) {
+  const [preset,setPreset] = useState("high_conviction");
+  const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+
+  useEffect(()=>{
+    let dead = false;
+    setBusy(true); setErr(null);
+    api(`/api/screener/stocklake?preset=${encodeURIComponent(preset)}`).then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[preset]);
+
+  return <>
+    <div className="chips" style={{marginBottom:14}}>
+      {STOCKLAKE_PRESETS.map(([k,l])=>
+        <div key={k} className={"chip"+(preset===k?" on":"")} onClick={()=>setPreset(k)}>{l}</div>)}
+    </div>
+    {busy && <Spin t="Scanning via Stocklake…"/>}
+    {err && <div className="err"><b>Couldn't load Stocklake screener</b>{err}</div>}
+    {!busy && !err && d && <>
+      <p className="note" style={{marginTop:0,marginBottom:18}}>{d.note}</p>
+      {d.results.length===0 ? <div className="center"><h3>No matches</h3><p>Nothing fits this preset right now.</p></div> :
+        <div className="grid">{d.results.map(c=><StocklakeHit key={c.symbol} c={c} dispatch={dispatch}/>)}</div>}
+    </>}
+  </>;
+}
+
 function Screener({dispatch}) {
-  const [source,setSource] = useState("universe"); // "universe" | "highvolume"
+  const [source,setSource] = useState("universe"); // "universe" | "highvolume" | "stocklake"
   const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
   const [hv,setHv] = useState(null), [hvBusy,setHvBusy] = useState(false), [hvErr,setHvErr] = useState(null);
 
@@ -2165,10 +2213,11 @@ function Screener({dispatch}) {
       <div className="tag" style={{marginTop:3}}>Scanned candidates · buy & sell signals</div></div>
 
     <div className="chips" style={{marginBottom:10}}>
-      {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"]].map(([k,l])=>
+      {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"],["stocklake","Discover (Stocklake)"]].map(([k,l])=>
         <div key={k} className={"chip"+(source===k?" on":"")} onClick={()=>setSource(k)}>{l}</div>)}
     </div>
 
+    {source==="stocklake" ? <StocklakeScreener dispatch={dispatch}/> : <>
     {activeBusy && <Spin t={source==="highvolume" ? "Fetching today's most active tickers…" : "Scanning universe…"}/>}
     {activeErr && <div className="err"><b>Couldn't load screener</b>{activeErr}</div>}
     {!activeBusy && !activeErr && (source==="highvolume" ? hv : d) && <>
@@ -2218,6 +2267,7 @@ function Screener({dispatch}) {
           {hv.stocks.length} tickers{hv.generated_at?` · ${new Date(hv.generated_at).toLocaleString()}`:""}{hv.cached?" · cached":""}
         </p>
       )}
+    </>}
     </>}
   </>;
 }

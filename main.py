@@ -466,6 +466,41 @@ class ScreenerResponse(BaseModel):
     cached: bool = False
 
 
+class StocklakeScreenerHit(BaseModel):
+    """
+    One row from Stocklake's get_screener — a different data source, a
+    different (AI-scored) methodology, and a much larger universe than
+    this app's own fixed-list Screener above. Not this app's RSI+MACD
+    rule, not backtest-validated by this app. See StocklakeScreenerResponse.
+    """
+    symbol: str
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    country: Optional[str] = None
+    price: Optional[float] = None
+    change_pct: Optional[float] = None
+    volume: Optional[int] = None
+    market_cap: Optional[float] = None
+    pe_forward: Optional[float] = None
+    rsi: Optional[float] = None
+    macd_signal: Optional[str] = None
+    sma200_trend: Optional[str] = None
+    analyst_rating: Optional[str] = None
+    rating: Optional[float] = None
+    ai_verdict: Optional[str] = None
+    ai_headline: Optional[str] = None
+    ai_score: Optional[int] = None
+    ai_score_band: Optional[str] = None
+
+
+class StocklakeScreenerResponse(BaseModel):
+    count: int
+    preset: Optional[str] = None
+    results: List[StocklakeScreenerHit]
+    note: str
+
+
 class HighVolumeResponse(BaseModel):
     stocks: List[ScreenerHit]
     universe_note: str
@@ -2908,6 +2943,57 @@ def screener_under20(force: bool = False):
 def screener_high_volume(force: bool = False):
     """Today's 20 highest-volume US and Canadian tickers, live — not limited to SCREENER_UNIVERSE."""
     return run_high_volume_screener(force=force)
+
+
+@app.get("/api/screener/stocklake", response_model=StocklakeScreenerResponse)
+def screener_stocklake(
+    preset: Optional[str] = None,
+    sector: Optional[str] = None,
+    min_ai_score: Optional[int] = None,
+    sma_trend: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    limit: int = 20,
+):
+    """
+    A second, independent discovery tool alongside the fixed-universe
+    Screener above — scans Stocklake's full ~3,500-symbol universe
+    (filtered server-side) using Stocklake's own AI-scored methodology,
+    rather than this app's small fixed list and RSI+MACD rule. A genuinely
+    different tool, not a replacement: nothing returned here has been
+    through this app's own backtest-validated pipeline.
+    """
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        raise HTTPException(status_code=503, detail="Stocklake isn't configured for this deployment.")
+
+    args: Dict[str, Any] = {"limit": max(1, min(25, limit))}
+    if preset:
+        args["preset"] = preset
+    if sector:
+        args["sector"] = sector
+    if min_ai_score is not None:
+        args["min_ai_score"] = min_ai_score
+    if sma_trend:
+        args["sma_trend"] = sma_trend
+    if sort_by:
+        args["sort_by"] = sort_by
+
+    payload = fetch_stocklake_context(
+        "__stocklake_screener__", {"screener": ("get_screener", args)}
+    ).get("screener")
+    if not isinstance(payload, dict) or "error" in payload:
+        raise HTTPException(status_code=502, detail="Couldn't reach Stocklake's screener right now.")
+
+    results = [StocklakeScreenerHit(**r) for r in payload.get("results", [])]
+    return StocklakeScreenerResponse(
+        count=payload.get("count", len(results)),
+        preset=payload.get("preset"),
+        results=results,
+        note=(
+            "Discovery via Stocklake's own AI-scored screener — a different "
+            "methodology and a much larger universe than this app's own Screener. "
+            "Not backtest-validated by this app."
+        ),
+    )
 
 
 HISTORY_RANGES = {
