@@ -1807,6 +1807,32 @@ def map_sector_intelligence(payload: Any, sector_name: Optional[str]) -> Optiona
 # Technicals only here — running FinBERT across 37 tickers' worth of headlines
 # would be far too slow and memory-hungry for a per-request call.
 # ---------------------------------------------------------------------------
+def _cap_conviction_for_liquidity(avg_vol: Optional[float], conviction: str) -> Tuple[str, Optional[str]]:
+    """
+    Shared thresholds behind the batch-scoring reliability cap below, used
+    both by the yfinance path (average pulled from its own OHLCV history)
+    and the Stocklake path (average taken directly from its own avg_volume
+    field) — kept as one function so the two data sources can never drift
+    to different "thin trading" cutoffs.
+
+    Returns (possibly-capped conviction, a short note if it was capped).
+    """
+    if conviction == "Neutral":
+        return conviction, None
+    if avg_vol is None or math.isnan(avg_vol):
+        if conviction != "Low":
+            return "Low", "Conviction capped: volume data unavailable, so liquidity can't be assessed."
+        return conviction, None
+
+    if avg_vol < 50_000:
+        if conviction != "Low":
+            return "Low", f"Conviction capped: ~{avg_vol:,.0f} shares/day is very thin trading."
+        return conviction, None
+    if avg_vol < 250_000 and conviction == "High":
+        return "Moderate", f"Conviction capped: ~{avg_vol:,.0f} shares/day is light trading."
+    return conviction, None
+
+
 def _batch_reliability_cap(df: pd.DataFrame, conviction: str) -> Tuple[str, Optional[str]]:
     """
     A cheap proxy for assess_data_quality() — full reliability scoring needs
@@ -1826,24 +1852,7 @@ def _batch_reliability_cap(df: pd.DataFrame, conviction: str) -> Tuple[str, Opti
         avg_vol = float(df["Volume"].tail(60).mean())
     except Exception:
         return conviction, None
-
-    # A present-but-empty/NaN Volume column (yfinance sometimes returns this
-    # for thin or derivative names) means "unknown," not "liquid" — treat it
-    # with the same suspicion assess_data_quality() gives unavailable volume,
-    # rather than silently leaving conviction uncapped because nan < 50_000
-    # is False.
-    if math.isnan(avg_vol):
-        if conviction != "Low":
-            return "Low", "Conviction capped: volume data unavailable, so liquidity can't be assessed."
-        return conviction, None
-
-    if avg_vol < 50_000:
-        if conviction != "Low":
-            return "Low", f"Conviction capped: ~{avg_vol:,.0f} shares/day is very thin trading."
-        return conviction, None
-    if avg_vol < 250_000 and conviction == "High":
-        return "Moderate", f"Conviction capped: ~{avg_vol:,.0f} shares/day is light trading."
-    return conviction, None
+    return _cap_conviction_for_liquidity(avg_vol, conviction)
 
 
 def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -1901,6 +1910,104 @@ def _score_history(t: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
 
 BATCH_DOWNLOAD_TIMEOUT_SECONDS = 30
 SINGLE_TICKER_RETRY_TIMEOUT_SECONDS = 15
+STOCKLAKE_BATCH_CHUNK_SIZE = 25  # get_stocks' own hard per-call limit
+
+
+def _score_from_stocklake(ticker: str, data: dict) -> Optional[Dict[str, Any]]:
+    """
+    Maps one get_stocks() entry onto this app's OWN generate_signal() rule
+    — same RSI/MACD-histogram thresholds as the yfinance path, applied to
+    Stocklake's precomputed indicators instead. Deliberately not Stocklake's
+    own `rating`/`signals.overall`/`ai_verdict` fields: this keeps the BUY/
+    SELL/HOLD call the same mechanical, backtested rule regardless of which
+    data source served it, rather than quietly swapping in an unvalidated
+    third-party verdict. See DECISION_LOGIC.md §16 on why Stocklake's richer
+    signals stay informational elsewhere in this app rather than live inputs.
+    """
+    price = data.get("price")
+    if price is None:
+        return None
+
+    indicators = data.get("indicators") or {}
+    rsi_val = indicators.get("rsi")
+    macd_hist_val = (indicators.get("macd") or {}).get("histogram")
+    volume = data.get("volume")
+    avg_volume = data.get("avg_volume")
+    volume_ratio = (
+        round(volume / avg_volume, 2) if volume is not None and avg_volume else None
+    )
+
+    signal, conviction, reasoning = generate_signal(rsi_val, macd_hist_val, volume_ratio)
+    conviction, cap_note = _cap_conviction_for_liquidity(avg_volume, conviction)
+    if cap_note:
+        reasoning += " " + cap_note
+
+    change_pct = data.get("change_pct")
+    return {
+        "ticker": ticker,
+        "price": round(float(price), 2),
+        "change_pct": round(float(change_pct), 2) if change_pct is not None else None,
+        "rsi": round(float(rsi_val), 2) if rsi_val is not None else None,
+        "macd_histogram": round(float(macd_hist_val), 4) if macd_hist_val is not None else None,
+        "volume_ratio": volume_ratio,
+        "signal": signal,
+        "conviction": conviction,
+        "reasoning": reasoning,
+    }
+
+
+def stocklake_batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Primary path for batch_score() below: Stocklake's precomputed
+    fundamentals+indicators (get_stocks), scored through this app's own
+    generate_signal() rule rather than trusting Stocklake's own verdict —
+    added after yfinance was observed rate-limited/blocked from this
+    deployment for 30+ minutes straight on 2026-08-28, taking Brief and
+    Screener down with it while every Stocklake call kept succeeding.
+
+    Skips any ticker whose Stocklake lookup symbol differs from the ticker
+    itself (i.e. suffix-stripped Canadian listings like .TO/.V/.CN/.NE) —
+    validating that a stripped-suffix lookup is actually the same company
+    needs the country/name check analyze() does per-ticker (see
+    validate_stocklake_stock), which isn't affordable at batch-scan scale
+    across a full universe. Those tickers, and anything Stocklake's own
+    batch call didn't return, are left for batch_score()'s yfinance
+    fallback below instead of risking a silently wrong company's data on a
+    BUY/SELL screener row.
+    """
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        return {}
+
+    direct_tickers = [t for t in tickers if _stocklake_symbol(t) == t]
+    if not direct_tickers:
+        return {}
+
+    # One shared MCP session for every chunk (same reasoning as
+    # fetch_stocklake_context's own docstring: a full-universe scan can
+    # need 15+ chunked get_stocks calls, and paying a separate handshake
+    # for each would be slow and, worse, reintroduce the kind of
+    # unbounded-latency risk this whole function exists to route around).
+    chunks = [
+        direct_tickers[i : i + STOCKLAKE_BATCH_CHUNK_SIZE]
+        for i in range(0, len(direct_tickers), STOCKLAKE_BATCH_CHUNK_SIZE)
+    ]
+    want = {f"chunk_{i}": ("get_stocks", {"symbols": chunk}) for i, chunk in enumerate(chunks)}
+    context = fetch_stocklake_context("__batch_score__", want)
+
+    results: Dict[str, Dict[str, Any]] = {}
+    direct_set = set(direct_tickers)
+    for key in want:
+        payload = context.get(key)
+        if not isinstance(payload, dict) or "error" in payload:
+            continue
+        for symbol, data in (payload.get("symbols") or {}).items():
+            ticker = symbol.upper()
+            if ticker not in direct_set or not isinstance(data, dict):
+                continue
+            scored = _score_from_stocklake(ticker, data)
+            if scored is not None:
+                results[ticker] = scored
+    return results
 
 
 def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -1908,7 +2015,15 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     if not tickers:
         return {}
 
-    results: Dict[str, Dict[str, Any]] = {}
+    # Stocklake first (see stocklake_batch_score's docstring for why) —
+    # whatever it can't or shouldn't cover falls through to the yfinance
+    # path below unchanged, so this degrades exactly like every other
+    # Stocklake integration in this app: no key, an error, or a skipped
+    # ticker all just mean "use the fallback," never a broken response.
+    results: Dict[str, Dict[str, Any]] = dict(stocklake_batch_score(tickers))
+    tickers = [t for t in tickers if t not in results]
+    if not tickers:
+        return results
 
     # yf.download()'s own per-request timeout only bounds a single HTTP
     # call — when Yahoo stalls instead of erroring (seen in production as
@@ -1934,15 +2049,18 @@ def batch_score(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         ).result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS)
     except FuturesTimeoutError:
         logger.error(f"Batch download timed out after {BATCH_DOWNLOAD_TIMEOUT_SECONDS}s for {len(tickers)} tickers")
-        return {t: {"error": "Market data is slow to respond right now — try again shortly."} for t in tickers}
+        results.update({t: {"error": "Market data is slow to respond right now — try again shortly."} for t in tickers})
+        return results
     except Exception as e:
         logger.error(f"Batch download failed: {e}")
-        return {t: {"error": "Could not fetch market data."} for t in tickers}
+        results.update({t: {"error": "Could not fetch market data."} for t in tickers})
+        return results
     finally:
         guard.shutdown(wait=False)
 
     if raw is None or raw.empty:
-        return {t: {"error": "No market data returned."} for t in tickers}
+        results.update({t: {"error": "No market data returned."} for t in tickers})
+        return results
 
     for t in tickers:
         try:
