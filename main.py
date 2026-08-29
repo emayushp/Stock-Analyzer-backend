@@ -4423,6 +4423,38 @@ VARIANT_DEFS = [
     ("divergence_confirm", "Require a supporting RSI divergence"),
 ]
 
+# Stocklake-first plan, P2: get_indicator_history's daily snapshots (Williams
+# %R, Ultimate Oscillator, Bollinger %B, DeMark TD Sequential — none of
+# which this app had before) were tested as candidate variants against the
+# above, same binomial+Bonferroni methodology, on an 8-ticker US basket
+# (AAPL/MSFT/JNJ/XOM/JPM/WMT/NVDA/PFE, ~2y daily history via
+# get_indicator_history). NONE cleared the significance bar, at any of the
+# 5/10/20-day horizons, on either the BUY or SELL side — nothing here was
+# promoted into VARIANT_DEFS. Two findings behind that result, worth
+# knowing before re-running this test rather than re-deriving them:
+#   1. This app's BUY signal is mostly MACD-momentum-driven (median RSI on
+#      BUY days ≈ 55-60, not oversold), so requiring a SECOND oscillator to
+#      ALSO be in textbook-oversold territory (the natural first instinct
+#      for a "confirmation" filter) produces ~zero overlapping events —
+#      it's testing an incompatible hypothesis, not "no edge." Reframing as
+#      an "avoid an already-exhausted move" exhaustion filter (buy_ok =
+#      ultimate_osc < 70 / williams_r < -20 / bb_pct < 100, using the
+#      tool's own documented thresholds rather than ones fit to this
+#      basket) produced real event counts (15-29 per ticker) but only 1-4
+#      of 8 tickers beat baseline — worse than a coin flip.
+#   2. TD Sequential (td_signal) is simply too rare to combine with this
+#      signal at all: 0-2 events per ticker over ~2 years of daily data,
+#      nowhere near MIN_RELIABLE_EVENTS.
+# Also notable, independent of the above: the existing RSI+MACD baseline
+# itself showed a slightly NEGATIVE 10-day BUY edge on this basket over
+# 2024-2026 (a strong-bull-market window) — not a bug, just this specific
+# basket/period, but a reminder that "no edge right now" is a real possible
+# outcome for the baseline too, not only for candidate filters.
+# Separately: get_indicator_history had no coverage at all for the
+# .TO tickers in this app's own DEFAULT_BASKET (RY/ENB/SHOP/BCE/TD/CNQ all
+# returned "fewer than 3 snapshots") as of 2026-08-29 — any future test
+# with this tool is US-only until that changes.
+
 MIN_RELIABLE_EVENTS = 10
 
 
