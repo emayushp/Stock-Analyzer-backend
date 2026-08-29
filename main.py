@@ -172,12 +172,6 @@ _SCREENER_TTL_SECONDS = 3600  # 1 hour — screening is not a minute-to-minute a
 _UNDER20_CACHE: Dict[str, Tuple[float, Any]] = {}
 _UNDER20_TTL_SECONDS = 3600
 
-# The "most actives" list shifts through the trading day but not second to
-# second — 15 minutes keeps this responsive without hammering Yahoo's
-# screener endpoint on every app open.
-_HIGH_VOLUME_CACHE: Dict[str, Tuple[float, Any]] = {}
-_HIGH_VOLUME_TTL_SECONDS = 900
-
 # USD/CAD barely moves minute to minute — cache aggressively.
 _FX_CACHE: Dict[str, Tuple[float, float]] = {}
 _FX_TTL_SECONDS = 3600
@@ -568,13 +562,6 @@ class UnusualActivityRequest(BaseModel):
 class UnusualActivityResponse(BaseModel):
     hits: List[UnusualActivityHit]
     note: str
-
-
-class HighVolumeResponse(BaseModel):
-    stocks: List[ScreenerHit]
-    universe_note: str
-    generated_at: str
-    cached: bool = False
 
 
 class PortfolioHolding(BaseModel):
@@ -2351,17 +2338,16 @@ def sort_hits(hits: List[ScreenerHit]) -> List[ScreenerHit]:
 
 # ---------------------------------------------------------------------------
 # Stocklake-first plan, P1: request handlers below read ONLY from these
-# caches — run_screener()/run_under20_screener()/run_high_volume_screener()
-# with force=True (the actual live fetch) are called exclusively by the
-# background refresh loop now. A request can still ask for `force=true`,
-# but that only nudges an out-of-band refresh along in the background and
-# still returns whatever's cached right now — it can no longer be the thing
-# that blocks on a live vendor call.
+# caches — run_screener()/run_under20_screener() with force=True (the
+# actual live fetch) are called exclusively by the background refresh loop
+# now. A request can still ask for `force=true`, but that only nudges an
+# out-of-band refresh along in the background and still returns whatever's
+# cached right now — it can no longer be the thing that blocks on a live
+# vendor call.
 # ---------------------------------------------------------------------------
 _MANUAL_REFRESH_LOCKS: Dict[str, threading.Lock] = {
     "screener": threading.Lock(),
     "under20": threading.Lock(),
-    "high_volume": threading.Lock(),
 }
 
 
@@ -2407,19 +2393,6 @@ def under20_from_cache(force: bool = False) -> ScreenerResponse:
         return ScreenerResponse(**{**cached[1], "cached": True})
     return ScreenerResponse(
         buy_candidates=[], sell_candidates=[], scanned_count=0,
-        universe_note="Still warming up — the first scan hasn't finished yet. Try again in a moment.",
-        generated_at=datetime.now(timezone.utc).isoformat(), cached=False,
-    )
-
-
-def high_volume_from_cache(force: bool = False) -> HighVolumeResponse:
-    if force:
-        _kick_background_refresh("high_volume", lambda: run_high_volume_screener(force=True))
-    cached = _HIGH_VOLUME_CACHE.get("high_volume")
-    if cached:
-        return HighVolumeResponse(**{**cached[1], "cached": True})
-    return HighVolumeResponse(
-        stocks=[],
         universe_note="Still warming up — the first scan hasn't finished yet. Try again in a moment.",
         generated_at=datetime.now(timezone.utc).isoformat(), cached=False,
     )
@@ -2495,129 +2468,6 @@ def run_under20_screener(force: bool = False) -> ScreenerResponse:
     )
 
     _UNDER20_CACHE["under20"] = (time.time(), response.model_dump())
-    return response
-
-
-def fetch_high_volume_tickers(us_count: int = 15, ca_count: int = 5) -> List[str]:
-    """
-    Today's actual highest-volume tickers, live from Yahoo — both US and
-    Canadian markets, deliberately NOT limited to SCREENER_UNIVERSE, so names
-    outside this app's fixed scan list still show up here when they're
-    genuinely trading heavy volume today.
-
-    Two separate queries, not one combined sort: Yahoo's predefined
-    "most_actives" screen only covers US-region tickers, and US mega-cap
-    share volume (hundreds of millions of shares/day) would swamp every
-    Canadian name if ranked together on raw share volume. The Canadian
-    query uses its own, much lower volume/market-cap thresholds — TSX/TSX-V
-    liquidity is a different scale entirely.
-    """
-    def fetch_us() -> List[str]:
-        result = yf.screen("most_actives", count=us_count)
-        quotes = (result or {}).get("quotes", [])
-        # yf.screen() internally defaults 'count' to 25 for custom queries
-        # regardless of what's passed (see fetch_ca below) — slice locally
-        # rather than trust the API to honor the requested size.
-        return [q["symbol"] for q in quotes if q.get("symbol")][:us_count]
-
-    def fetch_ca() -> List[str]:
-        ca_query = yf.EquityQuery("and", [
-            yf.EquityQuery("eq", ["region", "ca"]),
-            yf.EquityQuery("gte", ["intradaymarketcap", 300_000_000]),
-            yf.EquityQuery("gt", ["dayvolume", 300_000]),
-        ])
-        # Custom (non-predefined) queries are documented to take `size`, but
-        # yf.screen() still fills an unset `count` with its own default (25)
-        # and sends both fields — pass count too and slice locally either way,
-        # since which one Yahoo's endpoint actually honors isn't documented.
-        result = yf.screen(ca_query, sortField="dayvolume", sortAsc=False, size=ca_count, count=ca_count)
-        quotes = (result or {}).get("quotes", [])
-        return [q["symbol"] for q in quotes if q.get("symbol")][:ca_count]
-
-    tickers: List[str] = []
-    # Same reasoning as batch_score()'s guard: no `with ... as pool:` here,
-    # since that blocks on exit until both futures finish regardless of
-    # whether .result() already timed out — this call now feeds the
-    # background refresh loop, and a stalled yf.screen() must not be able to
-    # wedge that loop for good.
-    pool = ThreadPoolExecutor(max_workers=2)
-    try:
-        us_future = pool.submit(fetch_us)
-        ca_future = pool.submit(fetch_ca)
-        try:
-            tickers.extend(us_future.result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS))
-        except Exception as e:
-            logger.warning(f"US high-volume screen fetch failed: {e}")
-        try:
-            tickers.extend(ca_future.result(timeout=BATCH_DOWNLOAD_TIMEOUT_SECONDS))
-        except Exception as e:
-            logger.warning(f"Canadian high-volume screen fetch failed: {e}")
-    finally:
-        pool.shutdown(wait=False)
-
-    return tickers
-
-
-def run_high_volume_screener(force: bool = False) -> HighVolumeResponse:
-    if not force:
-        cached = _HIGH_VOLUME_CACHE.get("high_volume")
-        if cached and time.time() - cached[0] < _HIGH_VOLUME_TTL_SECONDS:
-            payload = cached[1]
-            return HighVolumeResponse(**{**payload, "cached": True})
-
-    tickers = fetch_high_volume_tickers()
-    if not tickers:
-        return HighVolumeResponse(
-            stocks=[],
-            universe_note="Could not fetch today's high-volume list from Yahoo right now — try again shortly.",
-            generated_at=datetime.now(timezone.utc).isoformat(),
-            cached=False,
-        )
-
-    scored = batch_score(tickers)
-    # Preserve Yahoo's own volume-descending order rather than re-sorting by
-    # conviction — the point of this panel is the volume ranking itself.
-    stocks = [
-        ScreenerHit(**scored[t])
-        for t in tickers
-        if scored.get(t) and not scored[t].get("error") and scored[t].get("price") is not None
-    ]
-
-    if not stocks:
-        # batch_score() failed for every ticker (rate limit / network blip on
-        # the price-history call, separate from the screen call above) —
-        # don't cache an empty "success" that would hide the failure for the
-        # full TTL, same as the empty-ticker-list guard above.
-        return HighVolumeResponse(
-            stocks=[],
-            universe_note="Could not score today's high-volume tickers right now — try again shortly.",
-            generated_at=datetime.now(timezone.utc).isoformat(),
-            cached=False,
-        )
-
-    # One region's fetch can fail while the other succeeds (fetch_high_volume_tickers
-    # logs but doesn't raise) — say so rather than claiming full US+CA coverage
-    # when the result is actually one-sided.
-    has_us = any(not t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
-    has_ca = any(t.endswith((".TO", ".V", ".CN", ".NE")) for t in tickers)
-    if has_us and has_ca:
-        markets_note = "Today's highest-volume US and Canadian tickers"
-    elif has_us:
-        markets_note = "Today's highest-volume US tickers (Canadian data was unavailable this refresh)"
-    else:
-        markets_note = "Today's highest-volume Canadian tickers (US data was unavailable this refresh)"
-
-    response = HighVolumeResponse(
-        stocks=stocks,
-        universe_note=(
-            f"{markets_note} on Yahoo Finance, refreshed live every 15 minutes — not the "
-            "fixed scan list used elsewhere, so names can appear here even if you've never "
-            "added or scanned them before."
-        ),
-        generated_at=datetime.now(timezone.utc).isoformat(),
-        cached=False,
-    )
-    _HIGH_VOLUME_CACHE["high_volume"] = (time.time(), response.model_dump())
     return response
 
 
@@ -3386,8 +3236,11 @@ def analyze_decision(ticker: str, request: AIDecisionRequest = AIDecisionRequest
 
 @app.get("/api/screener", response_model=ScreenerResponse)
 def screener(force: bool = False):
-    """Scan the fixed universe for current BUY / SELL technical signals.
-    Reads the background-refreshed cache only — see screener_from_cache()."""
+    """This app's own validated scan: the fixed universe run through the
+    backtested RSI/MACD rule. Reads the background-refreshed cache only —
+    see screener_from_cache(). The frontend's "Discover" mode
+    (/api/screener/stocklake) is the separate, much-larger-universe
+    AI-scored alternative — see that endpoint's own docstring."""
     return screener_from_cache(force)
 
 
@@ -3396,13 +3249,6 @@ def screener_under20(force: bool = False):
     """Canadian stocks under CAD $20, screened for current momentum signals.
     Reads the background-refreshed cache only — see under20_from_cache()."""
     return under20_from_cache(force)
-
-
-@app.get("/api/screener/high-volume", response_model=HighVolumeResponse)
-def screener_high_volume(force: bool = False):
-    """Today's highest-volume US and Canadian tickers — not limited to SCREENER_UNIVERSE.
-    Reads the background-refreshed cache only — see high_volume_from_cache()."""
-    return high_volume_from_cache(force)
 
 
 @app.get("/api/screener/stocklake", response_model=StocklakeScreenerResponse)
@@ -3415,12 +3261,17 @@ def screener_stocklake(
     limit: int = 20,
 ):
     """
-    A second, independent discovery tool alongside the fixed-universe
-    Screener above — scans Stocklake's full ~3,500-symbol universe
-    (filtered server-side) using Stocklake's own AI-scored methodology,
-    rather than this app's small fixed list and RSI+MACD rule. A genuinely
-    different tool, not a replacement: nothing returned here has been
-    through this app's own backtest-validated pipeline.
+    The "Browse the market" side of the Screener page (Stocklake-first
+    plan, P3) — scans Stocklake's full ~3,500-symbol universe (filtered
+    server-side) using Stocklake's own AI-scored methodology, rather than
+    this app's small fixed list and RSI+MACD rule. sort_by="volume" is
+    also what backs the frontend's "Most Active" option — a dedicated
+    /api/screener/high-volume (Yahoo's live most-actives) existed for that
+    before this endpoint could sort by volume itself; folded in here
+    rather than keeping two separate live-discovery mechanisms.
+    A genuinely different tool from the fixed-universe Screener above, not
+    a replacement: nothing returned here has been through this app's own
+    backtest-validated pipeline.
     """
     if not os.environ.get("STOCKLAKE_API_KEY"):
         raise HTTPException(status_code=503, detail="Stocklake isn't configured for this deployment.")
@@ -5774,15 +5625,18 @@ def sync_set_key(key: str, request: SyncSetRequest, current_user: Dict[str, Any]
 # BACKGROUND REFRESH LOOP
 #
 # Stocklake-first plan, P0+P1: nothing above this point should ever be the
-# thing a user request waits on. Screener, the under-$20 scan, high-volume,
-# and market regime were all previously fetched live on whichever request
-# happened to arrive after their cache went stale — meaning a slow or down
-# vendor turned into a slow or hung *response*. This loop refreshes those
-# same cache dicts proactively on a timer instead, so a request only ever
-# reads whatever's currently cached; see run_screener()/run_under20_screener()/
-# run_high_volume_screener()'s own force=True read-through-on-miss behavior
-# below for the "cache is still empty" edge case (a cold start, before this
-# loop's first cycle completes).
+# thing a user request waits on. Screener, the under-$20 scan, and market
+# regime were all previously fetched live on whichever request happened to
+# arrive after their cache went stale — meaning a slow or down vendor
+# turned into a slow or hung *response*. This loop refreshes those same
+# cache dicts proactively on a timer instead, so a request only ever reads
+# whatever's currently cached; see run_screener()/run_under20_screener()'s
+# own force=True read-through-on-miss behavior below for the "cache is
+# still empty" edge case (a cold start, before this loop's first cycle
+# completes). High-volume discovery no longer has its own cache/cycle here
+# as of P3 — it's the Stocklake-backed "Most Active" sort on
+# /api/screener/stocklake instead, which isn't on this app's own refresh
+# schedule.
 #
 # Runs in a plain OS thread, not an asyncio task, because
 # fetch_stocklake_context() calls asyncio.run() internally — that raises if
@@ -5798,7 +5652,7 @@ def _background_refresh_loop() -> None:
     # Small startup delay so this doesn't compete with the app's own
     # first-request warm-up for the same worker/network resources.
     time.sleep(5)
-    last_run = {"screener": 0.0, "under20": 0.0, "high_volume": 0.0, "regime": 0.0}
+    last_run = {"screener": 0.0, "under20": 0.0, "regime": 0.0}
     while True:
         now = time.time()
         if now - last_run["screener"] >= _SCREENER_TTL_SECONDS:
@@ -5813,12 +5667,6 @@ def _background_refresh_loop() -> None:
             except Exception as e:
                 logger.error(f"Background refresh failed (under-$20 universe): {e}")
             last_run["under20"] = time.time()
-        if now - last_run["high_volume"] >= _HIGH_VOLUME_TTL_SECONDS:
-            try:
-                run_high_volume_screener(force=True)
-            except Exception as e:
-                logger.error(f"Background refresh failed (high-volume screener): {e}")
-            last_run["high_volume"] = time.time()
         if now - last_run["regime"] >= _REGIME_TTL_SECONDS:
             try:
                 get_market_regime(canadian=False)
