@@ -2268,7 +2268,16 @@ function StocklakeHit({c, dispatch}) {
   </div>;
 }
 
-const STOCKLAKE_PRESETS = [["high_conviction","High Conviction"],["momentum","Momentum"],["oversold","Oversold"],["overbought","Overbought"]];
+// "__volume__" isn't a real Stocklake preset — it's a sentinel this
+// component maps to sort_by=volume&sort_dir=desc instead of a preset
+// param. Replaces the old separate "High Volume" tab (Yahoo's live
+// most-actives): folded in here since Stocklake's own screener can
+// already sort by volume, rather than keeping two parallel live-discovery
+// mechanisms (Stocklake-first plan, P3).
+const STOCKLAKE_PRESETS = [
+  ["high_conviction","High Conviction"],["momentum","Momentum"],
+  ["oversold","Oversold"],["overbought","Overbought"],["__volume__","🔥 Most Active"],
+];
 
 function StocklakeScreener({dispatch}) {
   const [preset,setPreset] = useState("high_conviction");
@@ -2277,7 +2286,10 @@ function StocklakeScreener({dispatch}) {
   useEffect(()=>{
     let dead = false;
     setBusy(true); setErr(null);
-    api(`/api/screener/stocklake?preset=${encodeURIComponent(preset)}`).then(j=>{ if(!dead) setD(j); })
+    // sort_dir isn't a query param the backend exposes — it always sorts
+    // desc by default, which is exactly "most active first" here anyway.
+    const qs = preset==="__volume__" ? "sort_by=volume" : `preset=${encodeURIComponent(preset)}`;
+    api(`/api/screener/stocklake?${qs}`).then(j=>{ if(!dead) setD(j); })
       .catch(e=>{ if(!dead) setErr(e.message); })
       .finally(()=>{ if(!dead) setBusy(false); });
     return ()=>{ dead = true; };
@@ -2299,9 +2311,11 @@ function StocklakeScreener({dispatch}) {
 }
 
 function Screener({dispatch}) {
-  const [source,setSource] = useState("universe"); // "universe" | "highvolume" | "stocklake"
+  // Two modes (Stocklake-first plan, P3 — was three: Fixed Universe, High
+  // Volume, Discover. High Volume folded into Discover's "Most Active"
+  // sort, since Stocklake's own screener already supports sort_by=volume).
+  const [source,setSource] = useState("universe"); // "universe" | "stocklake"
   const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
-  const [hv,setHv] = useState(null), [hvBusy,setHvBusy] = useState(false), [hvErr,setHvErr] = useState(null);
 
   useEffect(()=>{
     let dead = false;
@@ -2311,42 +2325,25 @@ function Screener({dispatch}) {
     return ()=>{ dead = true; };
   },[]);
 
-  useEffect(()=>{
-    if (source!=="highvolume" || hv || hvBusy) return;
-    let dead = false;
-    setHvBusy(true);
-    api("/api/screener/high-volume").then(j=>{ if(!dead) setHv(j); })
-      .catch(e=>{ if(!dead) setHvErr(e.message); })
-      .finally(()=>{ if(!dead) setHvBusy(false); });
-    return ()=>{ dead = true; };
-  },[source]);
-
-  const buys = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal==="BUY") : (d?.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"}));
-  const sells = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal==="SELL") : (d?.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"}));
-  // The fixed-universe source only ever returns buy/sell candidates, but the
-  // high-volume source is every one of today's most-active tickers — some
-  // will be HOLD. Keep those visible rather than silently dropping them.
-  const watching = source==="highvolume" ? (hv?.stocks||[]).filter(c=>c.signal!=="BUY" && c.signal!=="SELL") : [];
-  const activeBusy = source==="highvolume" ? hvBusy : busy;
-  const activeErr = source==="highvolume" ? hvErr : err;
-  const note = source==="highvolume" ? hv?.universe_note : d?.universe_note;
+  const buys = (d?.buy_candidates||[]).map(c=>({...c,signal:c.signal||"BUY"}));
+  const sells = (d?.sell_candidates||[]).map(c=>({...c,signal:c.signal||"SELL"}));
 
   return <>
     <div style={{margin:"28px 0 20px"}}><h1>Screener</h1>
       <div className="tag" style={{marginTop:3}}>Scanned candidates · buy & sell signals</div></div>
 
     <div className="chips" style={{marginBottom:10}}>
-      {[["universe","Fixed Universe"],["highvolume","🔥 High Volume"],["stocklake","Discover (Stocklake)"]].map(([k,l])=>
+      {[["universe","Your Scan"],["stocklake","Browse the Market"]].map(([k,l])=>
         <div key={k} className={"chip"+(source===k?" on":"")} onClick={()=>setSource(k)}>{l}</div>)}
     </div>
 
     {source==="stocklake" ? <StocklakeScreener dispatch={dispatch}/> : <>
-    {activeBusy && <Spin t={source==="highvolume" ? "Fetching today's most active tickers…" : "Scanning universe…"}/>}
-    {activeErr && <div className="err"><b>Couldn't load screener</b>{activeErr}</div>}
-    {!activeBusy && !activeErr && (source==="highvolume" ? hv : d) && <>
-      {note && <p className="note" style={{marginTop:0,marginBottom:18}}>{note}</p>}
+    {busy && <Spin t="Scanning universe…"/>}
+    {err && <div className="err"><b>Couldn't load screener</b>{err}</div>}
+    {!busy && !err && d && <>
+      {d.universe_note && <p className="note" style={{marginTop:0,marginBottom:18}}>{d.universe_note}</p>}
 
-      {buys.length===0 && sells.length===0 && watching.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches right now.</p></div> : <>
+      {buys.length===0 && sells.length===0 ? <div className="center"><h3>No candidates</h3><p>Nothing matches right now.</p></div> : <>
         {buys.length>0 && <>
           <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:12}}>
             <h2 style={{marginBottom:0,fontSize:17}}>Buy Candidates</h2>
@@ -2365,31 +2362,10 @@ function Screener({dispatch}) {
             {sells.map(c=><ScreenerCard key={c.ticker} c={c} dispatch={dispatch}/>)}
           </div>
         </>}
-        {watching.length>0 && <>
-          <div style={{display:"flex",alignItems:"center",gap:9,margin:"22px 0 12px"}}>
-            <h2 style={{marginBottom:0,fontSize:17}}>Also Scanned</h2>
-            <span className="mini" style={{background:"var(--holdBg)",color:"var(--holdText)"}}>{watching.length} watching</span>
-          </div>
-          <div className="card">
-            {watching.map(c=><div className="srow" key={c.ticker} onClick={()=>dispatch({type:"analyze", ticker:c.ticker})}>
-              <Avatar t={c.ticker}/>
-              <div style={{flex:1}}><b className="num">{c.ticker}</b>
-                <div className="meta">RSI {c.rsi ?? "—"} · Conv. {c.conviction}</div></div>
-              <SigBadge sig={c.signal}/>
-              <div className="num" style={{fontWeight:700,marginLeft:12}}>{c.price ?? "—"}</div>
-            </div>)}
-          </div>
-        </>}
       </>}
-      {source==="universe" ? (
-        <p className="center" style={{fontSize:11,padding:"18px 0 10px"}}>
-          Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
-        </p>
-      ) : (
-        <p className="center" style={{fontSize:11,padding:"18px 0 10px"}}>
-          {hv.stocks.length} tickers{hv.generated_at?` · ${new Date(hv.generated_at).toLocaleString()}`:""}{hv.cached?" · cached":""}
-        </p>
-      )}
+      <p className="center" style={{fontSize:11,padding:"18px 0 10px"}}>
+        Scanned {d.scanned_count ?? "—"} tickers{d.generated_at?` · ${new Date(d.generated_at).toLocaleString()}`:""}{d.cached?" · cached":""}
+      </p>
     </>}
     </>}
   </>;
