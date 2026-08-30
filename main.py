@@ -323,7 +323,7 @@ class MarketRegime(BaseModel):
     # informational instead of replacing anything: there's nothing to backtest
     # it against. None on any fetch failure — this whole block is optional.
     vix: Optional[float] = None
-    fear_greed_value: Optional[int] = None
+    fear_greed_value: Optional[float] = None
     fear_greed_label: Optional[str] = None
     breadth_oversold_pct: Optional[float] = None
     breadth_overbought_pct: Optional[float] = None
@@ -522,7 +522,7 @@ class MarketPulseResponse(BaseModel):
     ticker's regime note.
     """
     vix: Optional[float] = None
-    fear_greed_value: Optional[int] = None
+    fear_greed_value: Optional[float] = None
     fear_greed_label: Optional[str] = None
     breadth_oversold_pct: Optional[float] = None
     breadth_overbought_pct: Optional[float] = None
@@ -4949,7 +4949,20 @@ def get_market_regime(canadian: bool = False) -> MarketRegime:
     symbol = "^GSPTSE" if canadian else "^GSPC"
     cached = _REGIME_CACHE.get(symbol)
     if cached and time.time() - cached[0] < _REGIME_TTL_SECONDS:
-        return MarketRegime(**cached[1])
+        # Reconstructing from the cached dict validates every field, unlike
+        # the plain attribute assignment below that wrote it — a value that
+        # slipped past that assignment unvalidated (a fear_greed_value with
+        # a fractional part hit exactly this: Optional[int] silently
+        # accepted a float on assignment, then failed here on every read
+        # for the rest of the cache's TTL) would otherwise 500 every
+        # request that hits this cache entry, not just the one that
+        # populated it. Falls through to a live recompute instead, which
+        # overwrites the bad entry rather than leaving it poisoned for an
+        # hour.
+        try:
+            return MarketRegime(**cached[1])
+        except Exception as e:
+            logger.error(f"Cached market regime for {symbol} failed to validate, recomputing: {e}")
 
     fallback = MarketRegime(
         regime="Unknown", index_used=symbol, index_vs_200ma=None,
