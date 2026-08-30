@@ -3501,6 +3501,154 @@ def dividends(request: DividendsRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# Peer P/E valuation comparison
+#
+# A curated basket of well-known large-caps per yfinance sector string (the
+# same 11-sector taxonomy _STOCKLAKE_SECTOR_MAP/STOCKLAKE_SECTORS document,
+# expressed here in yfinance's own spelling since that's what a ticker's
+# Fundamentals.sector actually contains) — not "every ticker in this
+# sector," the same reasoning as SCREENER_UNIVERSE: a fixed, known,
+# reliably-fetchable list beats scanning and risking Yahoo rate limits on
+# a page load. Deliberately yfinance, not Stocklake: get_stocks()'s exact
+# field name for a P/E-style multiple isn't confirmed anywhere else in
+# this codebase, and guessing wrong would silently show nothing rather
+# than fail loud — safer to use the field this app already knows works
+# (Fundamentals.pe_ratio is trailingPE from the same source).
+# ---------------------------------------------------------------------------
+SECTOR_PEER_TICKERS: Dict[str, List[str]] = {
+    "Technology": ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD"],
+    "Financial Services": ["JPM", "V", "MA", "BAC", "GS", "MS", "BLK", "AXP"],
+    "Healthcare": ["UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "TMO", "ABT"],
+    "Consumer Cyclical": ["AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "BKNG", "LOW"],
+    "Consumer Defensive": ["WMT", "PG", "KO", "PEP", "COST", "PM", "MO", "CL"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "PSX", "MPC", "VLO", "OXY"],
+    "Industrials": ["BA", "CAT", "GE", "HON", "UPS", "LMT", "RTX", "DE"],
+    "Communication Services": ["NFLX", "DIS", "CMCSA", "VZ", "T", "TMUS", "META", "GOOGL"],
+    "Basic Materials": ["LIN", "APD", "SHW", "ECL", "FCX", "NEM", "NUE", "DOW"],
+    "Utilities": ["NEE", "DUK", "SO", "D", "AEP", "EXC", "XEL", "ED"],
+    "Real Estate": ["AMT", "PLD", "EQIX", "PSA", "O", "SPG", "DLR", "WELL"],
+}
+VALUATION_PEER_TTL_SECONDS = 4 * 3600  # P/E multiples don't move meaningfully within a day
+VALUATION_PEER_TIMEOUT_SECONDS = 6
+VALUATION_PEER_WORKERS = 6
+MIN_RELIABLE_PEERS = 3
+_VALUATION_PEER_CACHE: Dict[str, Tuple[float, Dict[str, Optional[float]]]] = {}
+
+
+class PeerValuation(BaseModel):
+    ticker: str
+    pe_ratio: Optional[float] = None
+
+
+class ValuationComparisonResponse(BaseModel):
+    ticker: str
+    sector: str
+    pe_ratio: Optional[float] = None
+    peers: List[PeerValuation]
+    peer_median_pe: Optional[float] = None
+    percentile: Optional[float] = None
+    verdict: str
+    note: str
+
+
+def _fetch_one_peer_pe(ticker: str) -> Optional[float]:
+    try:
+        pe = (yf.Ticker(ticker).info or {}).get("trailingPE")
+        return round(float(pe), 2) if pe else None
+    except Exception:
+        return None
+
+
+def _get_sector_peer_pes(sector: str) -> Dict[str, Optional[float]]:
+    """Every hardcoded peer's trailing P/E for one sector, cached for
+    VALUATION_PEER_TTL_SECONDS and shared across every ticker analyzed in
+    that sector — not re-fetched per request. Bounded concurrency with a
+    hard per-ticker timeout (same shutdown(wait=False) pattern used
+    throughout this app) so one slow/rate-limited Yahoo call can't hang
+    the whole comparison; a ticker that times out or errors is just
+    missing from the result, not a failure."""
+    cached = _VALUATION_PEER_CACHE.get(sector)
+    if cached and time.time() - cached[0] < VALUATION_PEER_TTL_SECONDS:
+        return cached[1]
+
+    peer_tickers = SECTOR_PEER_TICKERS.get(sector, [])
+    if not peer_tickers:
+        return {}
+
+    pool = ThreadPoolExecutor(max_workers=min(len(peer_tickers), VALUATION_PEER_WORKERS))
+    results: Dict[str, Optional[float]] = {}
+    try:
+        future_to_ticker = {pool.submit(_fetch_one_peer_pe, t): t for t in peer_tickers}
+        for future in future_to_ticker:
+            t = future_to_ticker[future]
+            try:
+                results[t] = future.result(timeout=VALUATION_PEER_TIMEOUT_SECONDS)
+            except Exception:
+                results[t] = None
+    finally:
+        pool.shutdown(wait=False)
+
+    _VALUATION_PEER_CACHE[sector] = (time.time(), results)
+    return results
+
+
+@app.get("/api/valuation/{ticker}", response_model=ValuationComparisonResponse)
+def valuation_comparison(ticker: str, sector: str, pe: Optional[float] = None):
+    """
+    How rich or cheap a ticker's P/E looks against a same-sector peer
+    basket — context the AI Decision doesn't have today, since it's purely
+    technical/momentum-driven. `sector` and `pe` come from the ticker's own
+    already-fetched Fundamentals (the Analyze page has both in hand before
+    calling this), so this endpoint's only job is the peer side. Informational
+    only, like every other Stocklake/yfinance-sourced panel in this app —
+    not folded into the AI Decision signal itself.
+    """
+    ticker = ticker.strip().upper()
+    peer_pes = _get_sector_peer_pes(sector)
+    peers = [
+        PeerValuation(ticker=t, pe_ratio=peer_pes.get(t))
+        for t in SECTOR_PEER_TICKERS.get(sector, [])
+        if t != ticker
+    ]
+    valid_peer_values = sorted(p.pe_ratio for p in peers if p.pe_ratio is not None)
+
+    peer_median = None
+    if valid_peer_values:
+        n = len(valid_peer_values)
+        mid = n // 2
+        peer_median = round(
+            valid_peer_values[mid] if n % 2 else (valid_peer_values[mid - 1] + valid_peer_values[mid]) / 2, 2
+        )
+
+    percentile = None
+    if pe is not None and len(valid_peer_values) >= MIN_RELIABLE_PEERS:
+        below = sum(1 for v in valid_peer_values if v < pe)
+        percentile = round(below / len(valid_peer_values) * 100, 0)
+
+    if pe is None:
+        verdict = "This ticker's P/E isn't available, so it can't be compared."
+    elif len(valid_peer_values) < MIN_RELIABLE_PEERS:
+        verdict = "Not enough peer P/E data available right now to compare."
+    elif pe > peer_median * 1.15:
+        verdict = f"Trades rich vs. its {sector} peers — {pe} vs. a peer median of {peer_median}."
+    elif pe < peer_median * 0.85:
+        verdict = f"Trades cheap vs. its {sector} peers — {pe} vs. a peer median of {peer_median}."
+    else:
+        verdict = f"In line with its {sector} peers — {pe} vs. a peer median of {peer_median}."
+
+    return ValuationComparisonResponse(
+        ticker=ticker, sector=sector, pe_ratio=pe, peers=peers,
+        peer_median_pe=peer_median, percentile=percentile, verdict=verdict,
+        note=(
+            "Trailing P/E only, against a fixed basket of well-known names in the same "
+            "sector — not the whole sector, and not adjusted for growth, margins, or size. "
+            "A rich P/E can still be a good buy if growth justifies it, and a cheap one can "
+            "be cheap for a reason. Context for the AI Decision, not part of it."
+        ),
+    )
+
+
 @app.get("/api/sector-rotation", response_model=SectorRotationResponse)
 def sector_rotation():
     """
