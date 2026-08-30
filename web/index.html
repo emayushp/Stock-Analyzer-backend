@@ -994,6 +994,47 @@ function EarningsTrack({quarters}) {
   </>;
 }
 
+/* ===== Peer P/E valuation comparison ===== */
+function ValuationCard({ticker, sector, pe}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(false);
+
+  useEffect(()=>{
+    if (!sector) { setD(null); setBusy(false); return; }
+    let dead = false;
+    setBusy(true); setErr(false); setD(null);
+    const q = `sector=${encodeURIComponent(sector)}${pe!=null?`&pe=${pe}`:""}`;
+    api(`/api/valuation/${encodeURIComponent(ticker)}?${q}`).then(j=>{ if(!dead) setD(j); })
+      .catch(()=>{ if(!dead) setErr(true); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[ticker,sector,pe]);
+
+  if (!sector || err) return null; // quiet — supplementary context, not core analysis
+  if (busy) return <div className="card"><h2>Valuation vs. Peers</h2><Spin/></div>;
+  if (!d || d.peers.length===0) return null;
+
+  const rankColor = d.percentile==null ? "var(--text)" : d.percentile>=65 ? "var(--red)" : d.percentile<=35 ? "var(--green)" : "var(--text)";
+
+  return <div className="card">
+    <h2>Valuation vs. Peers</h2>
+    <div style={{display:"flex",gap:20,marginBottom:14,flexWrap:"wrap"}}>
+      <div><div className="lbl">This Ticker P/E</div>
+        <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:22,marginTop:4}}>{d.pe_ratio ?? "—"}</div></div>
+      <div><div className="lbl">Peer Median P/E</div>
+        <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:22,marginTop:4}}>{d.peer_median_pe ?? "—"}</div></div>
+      {d.percentile!=null && <div><div className="lbl">Percentile</div>
+        <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:22,marginTop:4,color:rankColor}}>{d.percentile}</div></div>}
+    </div>
+    <p className="plain">{d.verdict}</p>
+    <div className="rule"/>
+    {d.peers.map(p=><div className="row" key={p.ticker}>
+      <span className="num">{p.ticker}</span>
+      <span>{p.pe_ratio ?? "no data"}</span>
+    </div>)}
+    <p className="note">{d.note}</p>
+  </div>;
+}
+
 /* ===== Analyze ===== */
 function Analyze({state, dispatch}) {
   const {q,data,busy,err,watchlist,holdings,portfolioValue,returnTab,verdictLoading,verdictError,requestDecision} = state;
@@ -1212,6 +1253,8 @@ function Analyze({state, dispatch}) {
                 <span>{data.fundamentals.fifty_two_week_low}</span><span>{data.fundamentals.fifty_two_week_high}</span></div>
             </>}
           </div>
+
+          <ValuationCard ticker={data.ticker} sector={data.fundamentals.sector} pe={data.fundamentals.pe_ratio}/>
         </div>
 
         <div>
