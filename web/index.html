@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta id="theme-color-light" name="theme-color" content="#F5EAD8" media="(prefers-color-scheme: light)">
-<meta id="theme-color-dark" name="theme-color" content="#211C16" media="(prefers-color-scheme: dark)">
+<meta id="theme-color-light" name="theme-color" content="#F4F6F9" media="(prefers-color-scheme: light)">
+<meta id="theme-color-dark" name="theme-color" content="#090D14" media="(prefers-color-scheme: dark)">
 <title>Market Analyzer</title>
 <link rel="icon" href="/static/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -22,7 +22,7 @@
     var saved = localStorage.getItem("ma_theme");
     if (saved === "light" || saved === "dark") {
       document.documentElement.setAttribute("data-theme", saved);
-      var color = saved === "dark" ? "#211C16" : "#F5EAD8";
+      var color = saved === "dark" ? "#090D14" : "#F4F6F9";
       document.getElementById("theme-color-light").setAttribute("content", color);
       document.getElementById("theme-color-dark").setAttribute("content", color);
     }
@@ -31,139 +31,142 @@
 </script>
 <style>
 /* ---------------------------------------------------------------------------
-   Editorial warm theme: a cream-and-terracotta palette with olive green as
-   the second accent — terracotta doubles as both the primary/brand color
-   and the negative/SELL signal, olive green carries positive/BUY, and HOLD
-   stays a plain neutral tan. Very generous rounded corners, soft warm
-   shadows instead of hard rules. Caprasimo (a chunky display face) for
-   headings and big figures, Figtree for everything else.
+   Dark Data Terminal: a dense trading-terminal aesthetic. Near-black navy
+   surface, blue as the single brand/primary color, green/red carry
+   BUY/SELL exactly like a real ticker tape, amber marks HOLD/caution.
+   Sharp small-radius geometry instead of pills, hairline borders instead
+   of soft shadows for structure. Inter for everything you read, JetBrains
+   Mono — real tabular figures — for everything you compare: prices,
+   percentages, tickers, every number on the screen.
 --------------------------------------------------------------------------- */
 :root{
-  --bg:#F5EAD8; --card:#EBDDC5; --cardAlt:#EBDDC5;
-  --border:color-mix(in srgb, #201E1D 16%, transparent); --borderLit:color-mix(in srgb, #201E1D 24%, transparent);
-  --text:#201E1D; --muted:color-mix(in srgb, #201E1D 55%, transparent); --faint:color-mix(in srgb, #201E1D 40%, transparent);
-  --accent:#C67139; --accentDim:#B2622D; --accentBg:#FFF2EB; --accentText:#643312;
-  --green:#56633F; --greenBg:#F0FAE1; --greenText:#3D472B;
-  --red:#C67139; --redBg:#FFF2EB; --redText:#8C491A;
-  --amber:#D67F48; --amberBg:#FFE1D0; --amberText:#643312;
-  --holdBg:#F9F4ED; --holdText:#474238;
-  --shadow-soft:0 1px 2px color-mix(in srgb, #2E2B25 14%, transparent);
-  --shadow-card:0 3px 10px color-mix(in srgb, #2E2B25 16%, transparent);
-  --shadow-pop:0 12px 32px color-mix(in srgb, #2E2B25 22%, transparent);
-  --r-lg:28px; --r-md:16px; --r-sm:8px;
-  --font-display:'Caprasimo',system-ui,sans-serif; --font-sans:'Figtree',system-ui,sans-serif;
-  --mono:'Figtree',system-ui,sans-serif;
+  --bg:#F4F6F9; --card:#FFFFFF; --cardAlt:#FAFBFD;
+  --border:rgba(15,23,42,.10); --borderLit:rgba(15,23,42,.20);
+  --text:#0F172A; --muted:#64748B; --faint:#94A3B8;
+  --accent:#2563EB; --accentDim:#1D4ED8; --accentBg:#EAF1FE; --accentText:#1E40AF;
+  --green:#16A34A; --greenBg:#EDFBF1; --greenText:#15803D;
+  --red:#DC2626; --redBg:#FEF0F0; --redText:#B91C1C;
+  --amber:#D97706; --amberBg:#FEF6E7; --amberText:#92400E;
+  --holdBg:#EEF1F6; --holdText:#475569;
+  --shadow-soft:0 1px 2px rgba(15,23,42,.05);
+  --shadow-card:0 3px 12px rgba(15,23,42,.07);
+  --shadow-pop:0 16px 40px rgba(15,23,42,.16);
+  --r-lg:10px; --r-md:8px; --r-sm:6px;
+  --font-display:'Inter',system-ui,sans-serif; --font-sans:'Inter',system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
 }
 @media(prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
-    --bg:#211C16; --card:#2C251D; --cardAlt:#2C251D;
-    --border:rgba(214,201,178,.16); --borderLit:rgba(214,201,178,.26);
-    --text:#F5EAD8; --muted:#B8AC97; --faint:#8C8171;
-    --accent:#E08A52; --accentDim:#C67139; --accentBg:rgba(224,138,82,.16); --accentText:#FFE1D0;
-    --green:#9CB37D; --greenBg:rgba(156,179,125,.14); --greenText:#C3D6A8;
-    --red:#E08A52; --redBg:rgba(224,138,82,.14); --redText:#F4C09D;
-    --amber:#F0A868; --amberBg:rgba(240,168,104,.16); --amberText:#FFDBB8;
-    --holdBg:rgba(184,172,151,.14); --holdText:#D8CDB8;
-    --shadow-soft:0 1px 2px rgba(0,0,0,.35);
-    --shadow-card:0 4px 14px rgba(0,0,0,.5);
-    --shadow-pop:0 16px 40px rgba(0,0,0,.55);
+    --bg:#090D14; --card:#111826; --cardAlt:#141D2E;
+    --border:rgba(148,163,184,.14); --borderLit:rgba(148,163,184,.26);
+    --text:#E7ECF3; --muted:#8B94A6; --faint:#5B6478;
+    --accent:#3B82F6; --accentDim:#60A5FA; --accentBg:rgba(59,130,246,.15); --accentText:#93C5FD;
+    --green:#22C55E; --greenBg:rgba(34,197,94,.14); --greenText:#4ADE80;
+    --red:#EF4444; --redBg:rgba(239,68,68,.14); --redText:#FCA5A5;
+    --amber:#F59E0B; --amberBg:rgba(245,158,11,.14); --amberText:#FCD34D;
+    --holdBg:rgba(148,163,184,.12); --holdText:#C3CAD6;
+    --shadow-soft:0 1px 2px rgba(0,0,0,.4);
+    --shadow-card:0 4px 16px rgba(0,0,0,.45);
+    --shadow-pop:0 20px 48px rgba(0,0,0,.6);
   }
 }
 :root[data-theme="dark"]{
-  --bg:#211C16; --card:#2C251D; --cardAlt:#2C251D;
-  --border:rgba(214,201,178,.16); --borderLit:rgba(214,201,178,.26);
-  --text:#F5EAD8; --muted:#B8AC97; --faint:#8C8171;
-  --accent:#E08A52; --accentDim:#C67139; --accentBg:rgba(224,138,82,.16); --accentText:#FFE1D0;
-  --green:#9CB37D; --greenBg:rgba(156,179,125,.14); --greenText:#C3D6A8;
-  --red:#E08A52; --redBg:rgba(224,138,82,.14); --redText:#F4C09D;
-  --amber:#F0A868; --amberBg:rgba(240,168,104,.16); --amberText:#FFDBB8;
-  --holdBg:rgba(184,172,151,.14); --holdText:#D8CDB8;
-  --shadow-soft:0 1px 2px rgba(0,0,0,.35);
-  --shadow-card:0 4px 14px rgba(0,0,0,.5);
-  --shadow-pop:0 16px 40px rgba(0,0,0,.55);
+  --bg:#090D14; --card:#111826; --cardAlt:#141D2E;
+  --border:rgba(148,163,184,.14); --borderLit:rgba(148,163,184,.26);
+  --text:#E7ECF3; --muted:#8B94A6; --faint:#5B6478;
+  --accent:#3B82F6; --accentDim:#60A5FA; --accentBg:rgba(59,130,246,.15); --accentText:#93C5FD;
+  --green:#22C55E; --greenBg:rgba(34,197,94,.14); --greenText:#4ADE80;
+  --red:#EF4444; --redBg:rgba(239,68,68,.14); --redText:#FCA5A5;
+  --amber:#F59E0B; --amberBg:rgba(245,158,11,.14); --amberText:#FCD34D;
+  --holdBg:rgba(148,163,184,.12); --holdText:#C3CAD6;
+  --shadow-soft:0 1px 2px rgba(0,0,0,.4);
+  --shadow-card:0 4px 16px rgba(0,0,0,.45);
+  --shadow-pop:0 20px 48px rgba(0,0,0,.6);
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.6 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
-h1,h2,h3,h4,h5,h6{font-family:var(--font-display);font-weight:400}
+body{background:var(--bg);color:var(--text);font:14px/1.55 var(--font-sans);-webkit-font-smoothing:antialiased;transition:background .15s,color .15s}
+h1,h2,h3,h4,h5,h6{font-family:var(--font-display);font-weight:700}
 :focus{outline:none}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
-::selection{background:color-mix(in srgb, var(--accent) 25%, transparent)}
-.num{font-family:var(--font-sans);font-variant-numeric:tabular-nums}
-.wrap{max-width:1320px;margin:0 auto;padding:32px 32px 72px}
-h1{font:400 32px/1.15 var(--font-display);letter-spacing:-.01em;margin:0 0 4px}
-.tag{font-size:13px;color:var(--muted);font-weight:500}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+::selection{background:color-mix(in srgb, var(--accent) 30%, transparent)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.wrap{max-width:1320px;margin:0 auto;padding:24px 24px 64px}
+h1{font:700 25px/1.2 var(--font-display);letter-spacing:-.02em;margin:0 0 4px}
+.tag{font-size:12.5px;color:var(--muted);font-weight:500}
 
 /* top navigation bar */
-.nav{display:flex;align-items:center;gap:26px;padding:14px 32px;border-bottom:none;
+.nav{display:flex;align-items:center;gap:20px;padding:10px 24px;border-bottom:1px solid var(--border);
   position:sticky;top:0;background:color-mix(in srgb, var(--bg) 92%, transparent);backdrop-filter:blur(10px);z-index:20}
-.nav-brand{font:400 19px/1 var(--font-display);letter-spacing:-.01em;margin-right:auto;white-space:nowrap;display:flex;align-items:center;gap:8px}
+.nav-brand{font:800 14px/1 var(--font-display);letter-spacing:.03em;text-transform:uppercase;margin-right:auto;white-space:nowrap;display:flex;align-items:center;gap:8px}
 .nav-brand span{color:var(--accent)}
-.nav-tabs{display:flex;gap:6px;align-items:center;overflow-x:auto;scrollbar-width:none}
+.nav-tabs{display:flex;gap:4px;align-items:center;overflow-x:auto;scrollbar-width:none}
 .nav-tabs::-webkit-scrollbar{display:none}
 .nav-tabs button{position:relative;display:flex;align-items:center;gap:6px;background:none;border:none;color:var(--muted);
-  font:600 13.5px/1 var(--font-sans);padding:9px 14px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+  font:600 12.5px/1 var(--font-sans);padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
 .nav-tabs button:hover{color:var(--text);background:var(--holdBg)}
 .nav-tabs button.on{color:#fff;background:var(--accent)}
 .nav-tabs button.on:hover{background:var(--accent)}
-.nav-tabs button svg{width:15px;height:15px;flex-shrink:0}
+.nav-tabs button svg{width:14px;height:14px;flex-shrink:0}
 @media(max-width:880px){
-  .nav{padding:12px 18px 10px;gap:10px;flex-direction:column;align-items:stretch}
+  .nav{padding:10px 16px 8px;gap:10px;flex-direction:column;align-items:stretch}
   .nav-brand{margin-right:0}
   .nav-tabs{overflow-x:auto;justify-content:flex-start;width:100%}
-  .wrap{padding:0 18px 60px}
+  .nav-tabs button{padding:10px 12px}
+  .wrap{padding:0 16px 56px}
 }
 
 /* search */
-.searchbar{display:flex;gap:9px;margin:22px 0 18px;position:relative}
-input,select,textarea{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:11px 18px;color:var(--text);font:15px var(--font-sans);width:100%;outline:none;transition:border-color .12s,box-shadow .12s}
+.searchbar{display:flex;gap:8px;margin:18px 0 14px;position:relative}
+input,select,textarea{background:var(--cardAlt);border:1px solid var(--border);border-radius:var(--r-md);padding:9px 14px;color:var(--text);font:14px var(--font-sans);width:100%;outline:none;transition:border-color .12s,box-shadow .12s}
 input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var(--accent);outline-offset:0;box-shadow:0 0 0 3px var(--accentBg)}
-.btn{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:999px;padding:11px 22px;font:700 14px/1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:background .15s,transform .1s,box-shadow .15s;box-shadow:var(--shadow-soft)}
+.btn{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:var(--r-sm);padding:9px 16px;font:700 13px/1.1 var(--font-sans);cursor:pointer;white-space:nowrap;transition:background .15s,transform .1s,box-shadow .15s;box-shadow:var(--shadow-soft)}
 .btn:hover{background:var(--accentDim);box-shadow:var(--shadow-card)}
 .btn:active{background:var(--accentDim);transform:translateY(1px);box-shadow:var(--shadow-soft)}
 .btn:disabled{opacity:.45;cursor:default;box-shadow:none}
-.btn.ghost{background:var(--card);border:1px solid var(--border);color:var(--text);box-shadow:none}
+.btn.ghost{background:var(--cardAlt);border:1px solid var(--border);color:var(--text);box-shadow:none}
 .btn.ghost:hover{background:var(--holdBg);border-color:var(--borderLit)}
 .btn.ghost:active{background:var(--border)}
-.btn.sm{padding:8px 16px;font-size:12.5px}
+.btn.sm{padding:7px 12px;font-size:11.5px}
+@media(max-width:880px){.btn{padding:11px 16px}}
 .sugg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;z-index:40;box-shadow:var(--shadow-pop)}
-.sugg div{padding:11px 15px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.sugg div{padding:10px 14px;cursor:pointer;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .sugg div:first-child{border-top:none}
 .sugg div:hover{background:var(--holdBg)}
-.sugg b{font-size:14px}
+.sugg b{font-size:13.5px;font-family:var(--mono)}
 .sugg span{color:var(--muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--holdBg);padding:3px 7px;border-radius:999px}
+.sugg em{font-style:normal;font-size:9.5px;color:var(--muted);background:var(--holdBg);padding:3px 7px;border-radius:var(--r-sm)}
 
 /* cards + grid */
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px;align-items:start}
-.card{background:var(--card);border:1px solid transparent;border-radius:var(--r-lg);padding:22px;margin-bottom:18px;box-shadow:var(--shadow-soft);transition:box-shadow .15s}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px;margin-bottom:12px;box-shadow:var(--shadow-soft);transition:box-shadow .15s,border-color .15s}
 .card.alt{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--shadow-card)}
-.card h2{font:400 19px/1.2 var(--font-display);letter-spacing:-.005em;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-.lbl{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted)}
-.row{display:flex;justify-content:space-between;padding:8px 0;gap:12px;font-size:12.5px}
+.card h2{font:700 15px/1.2 var(--font-display);letter-spacing:-.01em;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.lbl{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;font-weight:600;color:var(--muted)}
+.row{display:flex;justify-content:space-between;padding:6px 0;gap:12px;font-size:12px}
 .row span:first-child{color:var(--muted);font-weight:500}
-.row span:last-child{font-weight:700;font-family:var(--font-sans);font-variant-numeric:tabular-nums;text-align:right}
-.rule{height:1px;background:var(--border);margin:14px 0}
-.note{color:var(--muted);font-size:12px;line-height:1.6;margin-top:12px}
-.plain{font-size:13.5px;line-height:1.65}
+.row span:last-child{font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.rule{height:1px;background:var(--border);margin:12px 0}
+.note{color:var(--muted);font-size:11.5px;line-height:1.6;margin-top:10px}
+.plain{font-size:13px;line-height:1.6}
 .dim{color:var(--muted)}
-.mut{color:var(--muted);font-size:12.5px;line-height:1.6}
+.mut{color:var(--muted);font-size:12px;line-height:1.55}
 
 /* stat-card strips */
-.hero{position:relative;background:var(--card);color:var(--text);padding:24px 26px;margin-bottom:18px;box-shadow:var(--shadow-card);border-radius:var(--r-lg)}
-.hero.violet{background:var(--greenBg);color:var(--text);box-shadow:none}
-.hero-body{position:relative;display:flex;flex-wrap:wrap;gap:24px}
+.hero{position:relative;background:var(--card);color:var(--text);padding:18px 20px;margin-bottom:12px;box-shadow:var(--shadow-card);border-radius:var(--r-lg);border:1px solid var(--border)}
+.hero.violet{background:var(--greenBg);color:var(--text);box-shadow:none;border-color:transparent}
+.hero-body{position:relative;display:flex;flex-wrap:wrap;gap:22px}
 .hero-main{flex:1.4;min-width:220px}
-.hero-main .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:8px}
-.hero-main .v{font:400 40px/1 var(--font-display);letter-spacing:-.01em}
-.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:var(--greenBg);color:var(--greenText);padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:700;margin-top:10px}
-.hero-side{min-width:120px;border-left:1px solid var(--border);padding-left:18px}
-.hero-side .k{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:5px}
-.hero-side .v{font:400 21px/1.2 var(--font-display)}
+.hero-main .k{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:8px}
+.hero-main .v{font:600 32px/1 var(--mono);letter-spacing:-.01em}
+.hero-main .chip-pill{display:inline-flex;align-items:center;gap:6px;background:var(--greenBg);color:var(--greenText);padding:4px 10px;border-radius:var(--r-sm);font-size:12px;font-weight:700;margin-top:10px}
+.hero-side{min-width:120px;border-left:1px solid var(--border);padding-left:16px}
+.hero-side .k{font-size:10px;letter-spacing:.07em;text-transform:uppercase;font-weight:600;color:var(--muted);margin-bottom:5px}
+.hero-side .v{font:600 18px/1.2 var(--mono)}
 
 /* verdict/gauge — kept for backwards compat with any inline usage */
-.readout{background:var(--card);border:1px solid transparent;border-radius:var(--r-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
+.readout{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px;margin-bottom:14px;box-shadow:var(--shadow-soft)}
 .readout .top{display:flex;justify-content:space-between;align-items:flex-start}
-.verdict{font:400 36px/1 var(--font-display);letter-spacing:-.01em;margin-top:6px}
+.verdict{font:800 28px/1 var(--font-display);letter-spacing:.01em;text-transform:uppercase;margin-top:6px}
 .meter{display:flex;align-items:flex-end;height:14px;gap:3px;justify-content:flex-end}
 .seg{width:5px;border-radius:2px;background:var(--border)}
 .grad{margin:16px 0 14px}
@@ -171,49 +174,49 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{border-color:var
 .gradticks{display:flex;justify-content:space-between;margin-top:-2px}
 .gradticks i{width:2px;height:4px;background:var(--border);display:block}
 .gradticks i:nth-child(4n+1){height:8px;background:var(--borderLit)}
-.stats3{display:flex;gap:16px}
+.stats3{display:flex;gap:12px}
 .stats3 div{flex:1}
-.stats3 b{display:block;font:400 17px var(--font-display);margin-top:4px}
+.stats3 b{display:block;font:600 15px var(--mono);margin-top:4px}
 
 /* AI badge — marks anything Claude-generated */
 .ai-badge-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-.ai-badge{background:var(--accentBg);color:var(--accentText);font:700 10px/1 var(--font-sans);letter-spacing:.4px;padding:4px 9px;border-radius:999px}
+.ai-badge{background:var(--accentBg);color:var(--accentText);font:700 10px/1 var(--font-sans);letter-spacing:.4px;padding:4px 8px;border-radius:var(--r-sm)}
 
 /* gauge (circular conviction score) */
-.gauge-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
-.gauge{position:relative;width:168px;height:168px}
+.gauge-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}
+.gauge{position:relative;width:156px;height:156px}
 .gauge svg{width:100%;height:100%;transform:rotate(-90deg)}
 .gauge .num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.gauge .num b{font:400 46px/1 var(--font-display)}
+.gauge .num b{font:700 40px/1 var(--mono)}
 .gauge .num span{font-size:11px;opacity:.75;margin-top:3px}
-.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:var(--card);padding:7px 14px;border-radius:999px;font:600 13px/1 var(--font-sans)}
+.gauge-tag{display:inline-flex;align-items:center;gap:7px;background:var(--cardAlt);border:1px solid var(--border);padding:6px 12px;border-radius:var(--r-sm);font:600 12.5px/1 var(--font-sans)}
 
 /* banners */
-.banner{background:var(--card);border-left:4px solid;border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px;box-shadow:var(--shadow-soft)}
-.banner p{font-size:12px;line-height:1.6;margin-top:6px}
-.pill{border:1px solid;border-radius:999px;padding:5px 13px;font:600 12px/1 var(--font-sans)}
-.mini{border:1px solid transparent;border-radius:999px;padding:4px 10px;font:700 10px/1 var(--font-sans);letter-spacing:.2px}
+.banner{background:var(--card);border:1px solid var(--border);border-left:3px solid;border-radius:var(--r-md);padding:12px 14px;margin-bottom:14px;box-shadow:var(--shadow-soft)}
+.banner p{font-size:11.5px;line-height:1.6;margin-top:6px}
+.pill{border:1px solid;border-radius:var(--r-sm);padding:4px 11px;font:600 11.5px/1 var(--font-sans)}
+.mini{border:1px solid transparent;border-radius:var(--r-sm);padding:3px 8px;font:700 9.5px/1 var(--font-sans);letter-spacing:.3px}
 
 /* chart */
-.ranges{display:flex;gap:6px;margin:16px 0 10px;flex-wrap:wrap}
-.ranges button{background:none;border:none;color:var(--muted);font:600 11.5px/1 var(--font-sans);padding:6px 12px;border-radius:999px;cursor:pointer;transition:background .12s,color .12s}
+.ranges{display:flex;gap:4px;margin:14px 0 8px;flex-wrap:wrap}
+.ranges button{background:none;border:none;color:var(--muted);font:600 11px/1 var(--mono);padding:5px 10px;border-radius:var(--r-sm);cursor:pointer;transition:background .12s,color .12s}
 .ranges button:hover{background:var(--holdBg)}
 .ranges button.on{background:var(--accentBg);color:var(--accentDim)}
 svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 
 /* lists */
-.srow{display:flex;align-items:center;gap:12px;padding:11px 10px;border-radius:var(--r-sm);cursor:pointer;transition:background .12s}
+.srow{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:var(--r-sm);cursor:pointer;transition:background .12s}
 .srow:hover{background:var(--holdBg)}
 .srow:hover b{color:var(--accent)}
-.srow b{font-size:14px}
+.srow b{font-size:13.5px}
 .srow .meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px}
-.prow{display:flex;gap:10px;padding:8px 0;align-items:flex-start}
+.prow{display:flex;gap:10px;padding:7px 0;align-items:flex-start}
 .dot{width:7px;height:7px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.hl{border-radius:var(--r-md);background:var(--bg);padding:12px 14px;margin-bottom:10px}
-.hl .t{font-size:13px;line-height:1.5;margin-top:5px}
-.hl .ctx{font-size:11.5px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.5}
-.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-.chip{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:8px 16px;font:600 12.5px/1 var(--font-sans);color:var(--muted);cursor:pointer;box-shadow:none;transition:border-color .12s,color .12s,background .12s}
+.hl{border-radius:var(--r-md);background:var(--cardAlt);padding:10px 12px;margin-bottom:8px}
+.hl .t{font-size:12.5px;line-height:1.5;margin-top:5px}
+.hl .ctx{font-size:11px;color:var(--faint);font-style:italic;margin-top:5px;line-height:1.5}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.chip{background:var(--cardAlt);border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 12px;font:600 12px/1 var(--font-sans);color:var(--muted);cursor:pointer;box-shadow:none;transition:border-color .12s,color .12s,background .12s}
 .chip:hover{border-color:var(--accent);color:var(--text)}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
 .chip.on:hover{background:var(--accentDim);border-color:var(--accentDim);color:#fff}
@@ -223,37 +226,37 @@ svg.chart{width:100%;height:150px;display:block;cursor:crosshair}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
 }
-.center{text-align:center;padding:56px 20px;color:var(--muted)}
-.center h3{color:var(--text);font-size:16px;margin-bottom:7px;font-family:var(--font-display)}
-.err{background:var(--redBg);border-radius:var(--r-md);padding:14px 16px;margin-bottom:16px}
-.err b{color:var(--redText);display:block;margin-bottom:4px;font-size:14px}
-.exp{margin-top:12px}
-.expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:13px;margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--text)}
-.spin{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
+.center{text-align:center;padding:44px 20px;color:var(--muted)}
+.center h3{color:var(--text);font-size:15px;margin-bottom:7px;font-family:var(--font-display);font-weight:700}
+.err{background:var(--redBg);border-radius:var(--r-md);padding:12px 14px;margin-bottom:14px}
+.err b{color:var(--redText);display:block;margin-bottom:4px;font-size:13.5px}
+.exp{margin-top:10px}
+.expbody{background:var(--accentBg);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:12px;margin-top:9px;font-size:12px;line-height:1.6;color:var(--text)}
+.spin{width:20px;height:20px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
-.big{font:400 34px/1 var(--font-display);letter-spacing:-.01em}
-.chg{font:600 13.5px var(--font-sans);margin-top:6px}
-.split{display:flex;gap:16px;margin:10px 0}
+.big{font:600 27px/1 var(--mono);letter-spacing:-.01em}
+.chg{font:600 13px var(--mono);margin-top:5px}
+.split{display:flex;gap:12px;margin:8px 0}
 .split div{flex:1}
-.split b{display:block;font:400 21px var(--font-display);margin-top:4px}
-.modal{position:fixed;inset:0;background:rgba(46,43,37,.5);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
-.modal .box{background:var(--card);border-radius:var(--r-lg);padding:24px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-pop)}
-.opt{background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:14px;margin-top:8px;cursor:pointer;transition:border-color .12s,background .12s}
+.split b{display:block;font:600 17px var(--mono);margin-top:4px}
+.modal{position:fixed;inset:0;background:rgba(2,6,14,.6);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal .box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:var(--shadow-pop)}
+.opt{background:var(--cardAlt);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;margin-top:8px;cursor:pointer;transition:border-color .12s,background .12s}
 .opt:hover{border-color:var(--borderLit)}
 .opt.on{border-color:var(--accent);background:var(--accentBg)}
-.opt b{display:block;font-size:14px}
+.opt b{display:block;font-size:13.5px}
 .opt span{color:var(--muted);font-size:11.5px}
 
 /* badges: BUY / SELL / HOLD, ticker avatars — used across screens. Real
-   green/red convention: gains and BUY read in olive green, losses and SELL
-   read in terracotta, HOLD stays a plain neutral tan. */
-.sig-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:999px;font:700 11px/1 var(--font-sans);letter-spacing:.02em}
+   ticker-tape convention: gains and BUY read green, losses and SELL read
+   red, HOLD stays a plain neutral slate. */
+.sig-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:var(--r-sm);font:700 10.5px/1 var(--font-sans);letter-spacing:.03em}
 .sig-badge.buy{background:var(--greenBg);color:var(--greenText)}
 .sig-badge.sell{background:var(--redBg);color:var(--redText)}
 .sig-badge.hold{background:var(--holdBg);color:var(--holdText)}
-.avatar{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font:700 11px/1 var(--font-sans);flex-shrink:0}
+.avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font:700 10.5px/1 var(--mono);flex-shrink:0}
 
-@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding:18px}.hero-main .v{font-size:28px}}
+@media(max-width:720px){.grid{grid-template-columns:1fr}.hero{padding:14px}.hero-main .v{font-size:26px}}
 </style>
 </head>
 <body>
@@ -387,6 +390,10 @@ const NavIcon = ({name}) => <svg viewBox="0 0 24 24" fill="none" stroke="current
 const SENT = { positive:"var(--green)", negative:"var(--red)", neutral:"var(--muted)" };
 const fmt = n => n == null ? "—" : Number(n).toLocaleString();
 const pct = n => n == null ? "—" : `${n >= 0 ? "+" : ""}${n}%`;
+// A translucent tint of any color — including a var(--x) reference, which a
+// plain hex-alpha string suffix (e.g. color+"44") can't touch since CSS
+// custom properties aren't strings you can concatenate onto.
+const tint = (c, p) => `color-mix(in srgb, ${c} ${p}%, transparent)`;
 
 /* ===== Wealthsimple CSV import — holdings snapshot & activity log =====
    Ported byte-for-byte (logic-wise) from the mobile app's already-tested
@@ -682,7 +689,7 @@ const Spin = ({t}) => <div className="center" role="status" aria-live="polite">
 function Readout({t}) {
   const c = SIG[t.signal] || "var(--muted)";
   const filled = {High:3,Moderate:2,Low:1,Neutral:0}[t.conviction] ?? 0;
-  return <div className="readout" style={{borderColor:c+"44"}}>
+  return <div className="readout" style={{borderColor:tint(c,27)}}>
     <div className="top">
       <div className="lbl" style={{marginTop:3}}>Signal</div>
       <div style={{textAlign:"right"}}>
@@ -799,7 +806,7 @@ function Backtest({ticker}) {
     catch(e){ setAg({error:e.message}); } finally { setABusy(false); } };
 
   const block = (bt,label,accent) => {
-    return <div className="card" style={{borderColor:accent+"44",marginTop:14,marginBottom:0}}>
+    return <div className="card" style={{borderColor:tint(accent,27),marginTop:14,marginBottom:0}}>
       <div className="lbl" style={{color:accent,marginBottom:6}}>{label.toUpperCase()}</div>
       <p className="plain">{bt.plain_summary || `The app gave this signal ${bt.event_count} times.`}</p>
       {bt.plain_result && <p className="plain" style={{color:accent,marginTop:8,fontWeight:700}}>{bt.plain_result}</p>}
@@ -1103,19 +1110,19 @@ function Analyze({state, dispatch}) {
                 return <div style={{display:"grid",gridTemplateColumns:`repeat(${cols},1fr)`,gap:10,marginBottom:14}}>
                   {decision.entry != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Entry</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:16}}>{decision.entry} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.stop_loss != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Stop-Loss</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16,color:"var(--red)"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:16,color:"var(--red)"}}>{decision.stop_loss} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.take_profit != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Take-Profit</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
+                    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:16}}>{decision.take_profit} <span style={{fontSize:10.5,fontWeight:600,opacity:.65}}>{data.currency}</span></div>
                   </div>}
                   {decision.risk_reward_ratio != null && <div style={{background:tileBg,padding:12}}>
                     <div style={{fontSize:10.5,fontWeight:700,opacity:.7,textTransform:"uppercase",marginBottom:4}}>Reward:Risk</div>
-                    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:16}}>{decision.risk_reward_ratio} : 1</div>
+                    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:16}}>{decision.risk_reward_ratio} : 1</div>
                   </div>}
                 </div>;
               })()}
@@ -1238,7 +1245,7 @@ function Analyze({state, dispatch}) {
             <p className="plain" style={{marginTop:12}}>{data.sentiment_analysis.overall_impact}</p>
             {data.sentiment_analysis.headlines.map((h,i)=><div className="hl" key={i}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-                <span className="mini" style={{color:SENT[h.sentiment],borderColor:"transparent",background:SENT[h.sentiment]+"1F",textTransform:"uppercase"}}>{h.sentiment}</span>
+                <span className="mini" style={{color:SENT[h.sentiment],borderColor:"transparent",background:tint(SENT[h.sentiment],12),textTransform:"uppercase"}}>{h.sentiment}</span>
                 {h.publisher && <span style={{fontSize:10.5,color:"var(--faint)"}}>{h.publisher}</span>}
               </div>
               <div className="t">{h.link?<a href={h.link} target="_blank" rel="noopener" style={{color:"var(--text)"}}>{h.title}</a>:h.title}</div>
@@ -1251,7 +1258,7 @@ function Analyze({state, dispatch}) {
             {data.insider_activity.signal && <span className="mini" style={{
               color:SENT[(data.insider_activity.signal||"").toLowerCase()]||"var(--muted)",
               borderColor:"transparent",
-              background:(SENT[(data.insider_activity.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+              background:tint(SENT[(data.insider_activity.signal||"").toLowerCase()]||"var(--muted)",12),
               textTransform:"uppercase"}}>{data.insider_activity.signal}</span>}
             <Row l="Insider transactions" v={`${data.insider_activity.insider_buys ?? 0} buys · ${data.insider_activity.insider_sells ?? 0} sells`}/>
             {data.insider_activity.institutional_ownership_pct!=null && <Row l="Institutional ownership" v={`${data.insider_activity.institutional_ownership_pct}%`}/>}
@@ -1266,7 +1273,7 @@ function Analyze({state, dispatch}) {
               {data.sector_intelligence.signal && <span className="mini" style={{
                 color:SENT[(data.sector_intelligence.signal||"").toLowerCase()]||"var(--muted)",
                 borderColor:"transparent",
-                background:(SENT[(data.sector_intelligence.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+                background:tint(SENT[(data.sector_intelligence.signal||"").toLowerCase()]||"var(--muted)",12),
                 textTransform:"uppercase"}}>{data.sector_intelligence.signal}</span>}
               {data.sector_intelligence.cycle_stage && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{data.sector_intelligence.cycle_stage}</span>}
               {data.sector_intelligence.rotation_signal && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{data.sector_intelligence.rotation_signal}</span>}
@@ -1284,7 +1291,7 @@ function Analyze({state, dispatch}) {
             {data.analyst_consensus.rating && <span className="mini" style={{
               color:/buy/i.test(data.analyst_consensus.rating)?"var(--green)":/sell/i.test(data.analyst_consensus.rating)?"var(--red)":"var(--muted)",
               borderColor:"transparent",
-              background:(/buy/i.test(data.analyst_consensus.rating)?"var(--green)":/sell/i.test(data.analyst_consensus.rating)?"var(--red)":"var(--muted)")+"1F",
+              background:tint(/buy/i.test(data.analyst_consensus.rating)?"var(--green)":/sell/i.test(data.analyst_consensus.rating)?"var(--red)":"var(--muted)",12),
               textTransform:"uppercase"}}>{data.analyst_consensus.rating.replace(/_/g," ")}</span>}
             {data.analyst_consensus.target!=null && <Row l="Price target" v={
               `${data.analyst_consensus.target}` + (data.current_price!=null
@@ -1335,9 +1342,9 @@ function HeldCard({h,d,pv}) {
 
 /* ===== Portfolio ===== */
 // Deterministic color per ticker so avatars stay visually distinct without a
-// hand-maintained per-symbol map — a refined set of hues that sit
-// comfortably alongside the accent blue rather than competing with it.
-const AVATAR_COLORS = ["#56633F","#474238","#8C491A","#402310","#3D472B","#643312"];
+// hand-maintained per-symbol map — blues/violets/teals only, so nothing here
+// is ever mistaken for a green/red/amber BUY/SELL/HOLD signal color.
+const AVATAR_COLORS = ["#2563EB","#4F46E5","#7C3AED","#9333EA","#0891B2","#0D9488","#C026D3","#4338CA"];
 function avatarColor(t) {
   let h = 0;
   for (let i = 0; i < (t||"").length; i++) h = (h*31 + t.charCodeAt(i)) | 0;
@@ -1367,7 +1374,7 @@ function DividendTracker({holdings}) {
     <h2>Dividend Income</h2>
     {d.total_projected_annual_income!=null && <div style={{marginBottom:14}}>
       <div className="lbl">Projected Annual Income</div>
-      <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:26,marginTop:4}}>{fmt(d.total_projected_annual_income)}</div>
+      <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:26,marginTop:4}}>{fmt(d.total_projected_annual_income)}</div>
     </div>}
     {d.holdings.map(h=><div className="srow" key={h.ticker}>
       <Avatar t={h.ticker}/>
@@ -1752,13 +1759,13 @@ function WatchlistBacktestCard({holdings, watchlist, dispatch}) {
     {!busy && !err && d && <>
       {d.tested.length>0 && <div style={{display:"flex",gap:20,marginBottom:16,flexWrap:"wrap"}}>
         <div><div className="lbl">Overall Win Rate</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4}}>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:24,marginTop:4}}>
             {d.overall_buy_win_rate!=null?`${d.overall_buy_win_rate}%`:"—"}</div></div>
         <div><div className="lbl">Overall Edge (10d)</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4,color:edgeColor(d.overall_buy_edge_10d)}}>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:24,marginTop:4,color:edgeColor(d.overall_buy_edge_10d)}}>
             {d.overall_buy_edge_10d!=null?`${d.overall_buy_edge_10d>0?"+":""}${d.overall_buy_edge_10d}%`:"—"}</div></div>
         <div><div className="lbl">Total Signals</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4}}>{d.overall_buy_events}</div></div>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:24,marginTop:4}}>{d.overall_buy_events}</div></div>
       </div>}
       {d.tested.length===0 && <p className="mut">None of these tickers had enough history to backtest.</p>}
       {d.tested.map(t=><div className="srow" key={t.ticker} onClick={()=>dispatch({type:"analyze", ticker:t.ticker})}>
@@ -2047,7 +2054,7 @@ function HistoryRow({item, onEditNote}) {
   const color = SIG[item.app_signal] || "var(--muted)";
   return <div style={{borderTop:"1px solid var(--border)",paddingTop:10,paddingBottom:10}}>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-      <span className="mini" style={{color,borderColor:color+"66",background:color+"1F"}}>APP: {item.app_signal||"—"}</span>
+      <span className="mini" style={{color,borderColor:tint(color,40),background:tint(color,12)}}>APP: {item.app_signal||"—"}</span>
       <span className="mut" style={{fontSize:11.5}}>{item.action.toUpperCase()} @ {item.price} · {new Date(item.at).toLocaleDateString()}</span>
     </div>
     {editing ? <div style={{marginTop:8}}>
@@ -2180,7 +2187,7 @@ function Journal({state, dispatch}) {
             </div>}
           </div>
           <div style={{margin:"10px 0"}}>
-            <span className="mini" style={{color:ac,borderColor:ac+"66",background:ac+"1F"}}>
+            <span className="mini" style={{color:ac,borderColor:tint(ac,40),background:tint(ac,12)}}>
               {ag==="followed"?"FOLLOWED THE APP":ag==="overrode"?"WENT AGAINST THE APP":"NO ACTION ON SIGNAL"}</span>
           </div>
           {prices[e.ticker] && !closed && <Row l="Price now" v={prices[e.ticker]}/>}
@@ -2340,7 +2347,7 @@ function ScreenerCard({c, dispatch}) {
       <div style={{display:"flex",alignItems:"center",gap:9}}><Avatar t={c.ticker}/><b className="num" style={{fontSize:14}}>{c.ticker}</b></div>
       <SigBadge sig={c.signal}/>
     </div>
-    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:19}}>{c.price ?? "—"}</div>
+    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:19}}>{c.price ?? "—"}</div>
     {c.change_pct!=null && <div className="num" style={{fontSize:12,fontWeight:700,marginBottom:10,
       color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)} today</div>}
     <div style={{display:"flex",justifyContent:"space-between",fontSize:11.5}}>
@@ -2357,7 +2364,7 @@ function StocklakeHit({c, dispatch}) {
       <div style={{display:"flex",alignItems:"center",gap:9}}><Avatar t={c.symbol}/><b className="num" style={{fontSize:14}}>{c.symbol}</b></div>
       {c.ai_score!=null && <span className="mini" style={{background:"var(--accentBg,var(--holdBg))",color:"var(--accent)"}}>AI {c.ai_score}{c.ai_score_band?` · ${c.ai_score_band}`:""}</span>}
     </div>
-    <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:19}}>{c.price ?? "—"}</div>
+    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:19}}>{c.price ?? "—"}</div>
     {c.change_pct!=null && <div className="num" style={{fontSize:12,fontWeight:700,marginBottom:10,
       color:c.change_pct>=0?"var(--green)":"var(--red)"}}>{pct(c.change_pct)} today</div>}
     {c.ai_headline && <p className="note" style={{marginTop:0,marginBottom:8}}>{c.ai_headline}</p>}
@@ -2496,25 +2503,25 @@ function MarketPulse() {
       <div className="grid">
         <div className="card">
           <div className="lbl">VIX</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.vix ?? "—"}</div>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:30,marginTop:6}}>{d.vix ?? "—"}</div>
           <p className="mut" style={{marginTop:8,fontSize:12.5}}>The market's own "fear gauge" — expected volatility over the next 30 days. Higher means more turbulence priced in.</p>
         </div>
         <div className="card">
           <div className="lbl">Fear &amp; Greed</div>
           <div style={{display:"flex",alignItems:"baseline",gap:9,marginTop:6}}>
-            <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,color:fgColor}}>{d.fear_greed_value ?? "—"}</div>
-            {d.fear_greed_label && <span className="mini" style={{color:fgColor,borderColor:"transparent",background:fgColor+"1F",textTransform:"uppercase"}}>{d.fear_greed_label}</span>}
+            <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:30,color:fgColor}}>{d.fear_greed_value ?? "—"}</div>
+            {d.fear_greed_label && <span className="mini" style={{color:fgColor,borderColor:"transparent",background:tint(fgColor,12),textTransform:"uppercase"}}>{d.fear_greed_label}</span>}
           </div>
           <p className="mut" style={{marginTop:8,fontSize:12.5}}>0 is extreme fear, 100 is extreme greed — often a contrarian read: extremes can mark exhaustion, not direction.</p>
         </div>
         <div className="card">
           <div className="lbl">Breadth — Oversold</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.breadth_oversold_pct!=null?`${d.breadth_oversold_pct}%`:"—"}</div>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:30,marginTop:6}}>{d.breadth_oversold_pct!=null?`${d.breadth_oversold_pct}%`:"—"}</div>
           <p className="mut" style={{marginTop:8,fontSize:12.5}}>Share of stocks technically oversold right now. A high reading alongside a falling market can signal capitulation.</p>
         </div>
         <div className="card">
           <div className="lbl">Breadth — Overbought</div>
-          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:30,marginTop:6}}>{d.breadth_overbought_pct!=null?`${d.breadth_overbought_pct}%`:"—"}</div>
+          <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:30,marginTop:6}}>{d.breadth_overbought_pct!=null?`${d.breadth_overbought_pct}%`:"—"}</div>
           <p className="mut" style={{marginTop:8,fontSize:12.5}}>Share of stocks technically overbought right now. A high reading in a rally can mean stretched, not necessarily done.</p>
         </div>
       </div>
@@ -2614,7 +2621,7 @@ function SectorRotation() {
             {s.signal && <span className="mini" style={{
               color:SENT[(s.signal||"").toLowerCase()]||"var(--muted)",
               borderColor:"transparent",
-              background:(SENT[(s.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+              background:tint(SENT[(s.signal||"").toLowerCase()]||"var(--muted)",12),
               textTransform:"uppercase"}}>{s.signal}</span>}
             {s.cycle_stage && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{s.cycle_stage}</span>}
             {s.rotation_signal && <span className="mini" style={{color:"var(--muted)",borderColor:"transparent",background:"var(--border)"}}>{s.rotation_signal}</span>}
@@ -2674,7 +2681,7 @@ function UnusualActivity({state, dispatch}) {
             {h.activity.signal && <span className="mini" style={{
               color:SENT[(h.activity.signal||"").toLowerCase()]||"var(--muted)",
               borderColor:"transparent",
-              background:(SENT[(h.activity.signal||"").toLowerCase()]||"var(--muted)")+"1F",
+              background:tint(SENT[(h.activity.signal||"").toLowerCase()]||"var(--muted)",12),
               textTransform:"uppercase"}}>{h.activity.signal}</span>}
           </div>)}
         </div>
@@ -2858,13 +2865,13 @@ function App() {
     const darkMeta = document.getElementById("theme-color-dark");
     if (theme === "light" || theme === "dark") {
       document.documentElement.setAttribute("data-theme", theme);
-      const color = theme === "dark" ? "#0B1120" : "#F8FAFC";
+      const color = theme === "dark" ? "#090D14" : "#F4F6F9";
       lightMeta.setAttribute("content", color);
       darkMeta.setAttribute("content", color);
     } else {
       document.documentElement.removeAttribute("data-theme");
-      lightMeta.setAttribute("content", "#F8FAFC");
-      darkMeta.setAttribute("content", "#0B1120");
+      lightMeta.setAttribute("content", "#F4F6F9");
+      darkMeta.setAttribute("content", "#090D14");
     }
     try { theme === "system" ? localStorage.removeItem("ma_theme") : localStorage.setItem("ma_theme", theme); } catch {}
   }, [theme]);
