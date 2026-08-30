@@ -575,6 +575,27 @@ class PortfolioRequest(BaseModel):
     holdings: List[PortfolioHolding]
 
 
+class DividendInfo(BaseModel):
+    ticker: str
+    dividend_rate: Optional[float] = None  # annualized, per share, in the ticker's own currency
+    dividend_yield: Optional[float] = None  # percent
+    ex_dividend_date: Optional[str] = None  # most recent recorded ex-div date, YYYY-MM-DD — see note below
+    shares_held: Optional[float] = None
+    projected_annual_income: Optional[float] = None  # dividend_rate * shares_held; holdings only
+
+
+class DividendsRequest(BaseModel):
+    holdings: List[PortfolioHolding] = []
+    watchlist: List[str] = []
+
+
+class DividendsResponse(BaseModel):
+    holdings: List[DividendInfo]
+    watchlist: List[DividendInfo]
+    total_projected_annual_income: Optional[float] = None
+    note: str
+
+
 class HoldingResult(BaseModel):
     ticker: str
     shares: float
@@ -3403,6 +3424,83 @@ def earnings_calendar(request: EarningsCalendarRequest):
     )
 
 
+def _parse_stocklake_date(raw: Optional[str]) -> Optional[str]:
+    """Normalizes a Stocklake ISO datetime string to a plain YYYY-MM-DD, or
+    None if missing/unparseable. Unlike _parse_future_stocklake_earnings_date,
+    doesn't require the date to be in the future — get_stock's
+    ex_dividend_date is the most recently RECORDED ex-div date, which is
+    usually in the past by the time you're looking at it, not a forward
+    calendar entry."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).date().strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+@app.post("/api/dividends", response_model=DividendsResponse)
+def dividends(request: DividendsRequest):
+    """
+    Dividend tracking (Stocklake-first plan follow-up): dividend_rate,
+    dividend_yield, and ex_dividend_date are already part of every
+    get_stock()/get_stocks() payload this app fetches — used elsewhere for
+    fundamentals/technicals/earnings — but were never surfaced on their
+    own. Same batch pattern as the earnings calendar: holdings + watchlist
+    tickers, one shared session via _stocklake_batch_stocks().
+
+    ex_dividend_date is shown as-is, not filtered to "upcoming" the way
+    earnings dates are — Stocklake's field is the most recently recorded
+    ex-div date, not a forward-looking calendar entry, so claiming a
+    "next payment date" from it would be fabricating precision this data
+    doesn't have. Tickers with no dividend data at all (growth stocks,
+    non-payers) are simply omitted rather than shown as a row of dashes.
+    """
+    holding_tickers = {h.ticker.strip().upper(): h.shares for h in request.holdings}
+    watch_tickers = [t.strip().upper() for t in request.watchlist if t and t.strip()]
+    all_tickers = list({*holding_tickers.keys(), *watch_tickers})
+
+    if not all_tickers:
+        return DividendsResponse(holdings=[], watchlist=[], note="No tickers to check.")
+    if not os.environ.get("STOCKLAKE_API_KEY"):
+        raise HTTPException(status_code=503, detail="Stocklake isn't configured for this deployment.")
+
+    raw = _stocklake_batch_stocks(all_tickers)
+
+    def build(ticker: str, shares: Optional[float]) -> Optional[DividendInfo]:
+        data = raw.get(ticker)
+        if not data:
+            return None
+        rate = data.get("dividend_rate")
+        yield_pct = data.get("dividend_yield")
+        if rate is None and yield_pct is None:
+            return None  # not a dividend payer (or Stocklake has no data for it)
+        income = round(rate * shares, 2) if (rate is not None and shares) else None
+        return DividendInfo(
+            ticker=ticker, dividend_rate=rate, dividend_yield=yield_pct,
+            ex_dividend_date=_parse_stocklake_date(data.get("ex_dividend_date")),
+            shares_held=shares, projected_annual_income=income,
+        )
+
+    holdings_out = [d for t, s in holding_tickers.items() if (d := build(t, s)) is not None]
+    watchlist_out = [
+        d for t in watch_tickers
+        if t not in holding_tickers and (d := build(t, None)) is not None
+    ]
+    total_income = round(sum(d.projected_annual_income or 0 for d in holdings_out), 2) if holdings_out else None
+
+    return DividendsResponse(
+        holdings=holdings_out, watchlist=watchlist_out,
+        total_projected_annual_income=total_income,
+        note=(
+            "Dividend rate, yield, and most recent ex-dividend date via Stocklake. "
+            "Projected annual income assumes the current rate holds and share count "
+            "doesn't change — not a guarantee. Non-payers are omitted rather than "
+            "shown as empty rows."
+        ),
+    )
+
+
 @app.get("/api/sector-rotation", response_model=SectorRotationResponse)
 def sector_rotation():
     """
@@ -3713,6 +3811,32 @@ class BacktestResponse(BaseModel):
     generated_at: str
 
 
+class TickerBacktestSummary(BaseModel):
+    ticker: str
+    trading_days: int
+    buy_events: int
+    buy_win_rate: Optional[float] = None
+    buy_edge_10d: Optional[float] = None
+    sell_events: int
+    sell_win_rate: Optional[float] = None
+    sell_edge_10d: Optional[float] = None
+    verdict: str
+
+
+class WatchlistBacktestRequest(BaseModel):
+    tickers: List[str]
+
+
+class WatchlistBacktestResponse(BaseModel):
+    period: str
+    tested: List[TickerBacktestSummary]
+    skipped: List[str]
+    overall_buy_events: int
+    overall_buy_win_rate: Optional[float] = None
+    overall_buy_edge_10d: Optional[float] = None
+    note: str
+
+
 def _score_row(rsi_val: float, macd_hist_val: float) -> str:
     """Same scoring rule as the live signal, applied historically."""
     score = 0
@@ -3826,7 +3950,7 @@ def run_backtest(ticker: str, period: str = "2y") -> BacktestResponse:
     ticker = ticker.strip().upper()
 
     try:
-        hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
+        hist = _yf_history_with_timeout(yf.Ticker(ticker), period)
     except Exception as e:
         logger.error(f"Backtest fetch failed for {ticker}: {e}")
         raise HTTPException(status_code=502, detail="Couldn't fetch history for the backtest.")
@@ -4019,6 +4143,112 @@ def backtest(ticker: str, period: str = "2y"):
     # analyzed, or is being warmed in the background right now, this reuses
     # that work instead of redundantly refetching and recomputing.
     return _get_or_run_backtest(ticker, period)
+
+
+WATCHLIST_BACKTEST_MAX_TICKERS = 15
+WATCHLIST_BACKTEST_WORKERS = 5
+# Outer bound per ticker; _get_or_run_backtest -> run_backtest's own
+# _yf_history_with_timeout already caps the fetch at BATCH_DOWNLOAD_TIMEOUT_
+# SECONDS (30s) — this is a second, slightly wider bound so a single slow
+# ticker can't stretch the whole dashboard past a reasonable wait, matching
+# the same "belt and suspenders" pattern batch_score() uses.
+WATCHLIST_BACKTEST_PER_TICKER_TIMEOUT_SECONDS = 40
+
+
+def _ticker_backtest_summary(ticker: str) -> Optional[TickerBacktestSummary]:
+    try:
+        bt = _get_or_run_backtest(ticker, "2y")
+    except HTTPException as e:
+        logger.info(f"Watchlist backtest: skipping {ticker} ({e.detail})")
+        return None
+    except Exception as e:
+        logger.info(f"Watchlist backtest: skipping {ticker} ({e})")
+        return None
+    if bt is None:
+        return None
+
+    def horizon10(sb: SignalBacktest):
+        h = next((x for x in sb.horizons if x.days == 10), None)
+        return (h.win_rate, h.edge) if h else (None, None)
+
+    buy_win, buy_edge = horizon10(bt.buy)
+    sell_win, sell_edge = horizon10(bt.sell)
+    return TickerBacktestSummary(
+        ticker=ticker, trading_days=bt.trading_days,
+        buy_events=bt.buy.event_count, buy_win_rate=buy_win, buy_edge_10d=buy_edge,
+        sell_events=bt.sell.event_count, sell_win_rate=sell_win, sell_edge_10d=sell_edge,
+        verdict=bt.verdict,
+    )
+
+
+@app.post("/api/backtest/watchlist", response_model=WatchlistBacktestResponse)
+def backtest_watchlist(request: WatchlistBacktestRequest):
+    """
+    "Has this app's own signal actually worked on MY stocks" — runs the
+    same per-ticker backtest the manual "Run backtest" button uses
+    (_get_or_run_backtest, sharing its 24h cache with analyze()'s own
+    track-record annotation) across a whole list at once, with bounded
+    concurrency, instead of requiring one click per ticker. Always period
+    "2y" — the only period _get_or_run_backtest caches, so anything else
+    would mean zero cache reuse and a much slower dashboard for no benefit.
+
+    A ticker _get_or_run_backtest can't backtest (too little history, a
+    fetch failure) is simply omitted from `tested` and listed in `skipped`
+    — same graceful-degradation shape as every other multi-ticker endpoint
+    in this app, not a failure of the whole request.
+    """
+    tickers = list(dict.fromkeys(t.strip().upper() for t in request.tickers if t and t.strip()))
+    truncated = len(tickers) > WATCHLIST_BACKTEST_MAX_TICKERS
+    tickers = tickers[:WATCHLIST_BACKTEST_MAX_TICKERS]
+
+    if not tickers:
+        return WatchlistBacktestResponse(
+            period="2y", tested=[], skipped=[], overall_buy_events=0,
+            note="No tickers to check.",
+        )
+
+    # Deliberately not `with ThreadPoolExecutor(...) as pool:` — see
+    # batch_score()'s guard for why: that form blocks on exit until every
+    # submitted future finishes, even ones already abandoned by a timed-out
+    # .result() call, which would silently undo the per-ticker timeout below.
+    pool = ThreadPoolExecutor(max_workers=min(len(tickers), WATCHLIST_BACKTEST_WORKERS))
+    results: Dict[str, Optional[TickerBacktestSummary]] = {}
+    try:
+        future_to_ticker = {pool.submit(_ticker_backtest_summary, t): t for t in tickers}
+        for future in future_to_ticker:
+            t = future_to_ticker[future]
+            try:
+                results[t] = future.result(timeout=WATCHLIST_BACKTEST_PER_TICKER_TIMEOUT_SECONDS)
+            except Exception as e:
+                logger.info(f"Watchlist backtest: {t} timed out or errored: {e}")
+                results[t] = None
+    finally:
+        pool.shutdown(wait=False)
+
+    tested = [results[t] for t in tickers if results.get(t) is not None]
+    skipped = [t for t in tickers if results.get(t) is None]
+
+    total_buy_events = sum(t.buy_events for t in tested)
+    reliable = [t for t in tested if t.buy_events >= MIN_RELIABLE_EVENTS and t.buy_edge_10d is not None and t.buy_win_rate is not None]
+    overall_win = round(sum(t.buy_win_rate for t in reliable) / len(reliable), 1) if reliable else None
+    overall_edge = round(sum(t.buy_edge_10d for t in reliable) / len(reliable), 2) if reliable else None
+
+    note = (
+        "How this app's own BUY/SELL signal has performed on the tickers you hold "
+        "or watch, over the last 2 years — same methodology as the per-ticker "
+        "backtest, run automatically instead of one click at a time. Tickers with "
+        f"fewer than {MIN_RELIABLE_EVENTS} signals are shown but excluded from the "
+        "overall average below — too few to judge on their own."
+    )
+    if truncated:
+        note += f" Checked the first {WATCHLIST_BACKTEST_MAX_TICKERS} tickers only."
+
+    return WatchlistBacktestResponse(
+        period="2y", tested=tested, skipped=skipped,
+        overall_buy_events=total_buy_events,
+        overall_buy_win_rate=overall_win, overall_buy_edge_10d=overall_edge,
+        note=note,
+    )
 
 
 # ===========================================================================

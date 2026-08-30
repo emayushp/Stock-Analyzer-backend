@@ -1346,6 +1346,43 @@ function avatarColor(t) {
 const Avatar = ({t}) => <div className="avatar" style={{background:avatarColor(t)}}>{(t||"").replace(/\..*/,"").slice(0,4)}</div>;
 const SigBadge = ({sig}) => <span className={"sig-badge "+(sig==="BUY"?"buy":sig==="SELL"?"sell":"hold")}>{sig}</span>;
 
+function DividendTracker({holdings}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+
+  const key = holdings.map(h=>`${h.ticker}:${h.shares}`).join(",");
+  useEffect(()=>{
+    let dead = false;
+    setBusy(true); setErr(null);
+    api("/api/dividends", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({holdings, watchlist:[]})}).then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[key]);
+
+  if (busy || err || !d) return null; // quiet — this is a supplementary card, not core portfolio data
+  if (d.holdings.length===0) return null; // no dividend payers held — nothing useful to show
+
+  return <div className="card">
+    <h2>Dividend Income</h2>
+    {d.total_projected_annual_income!=null && <div style={{marginBottom:14}}>
+      <div className="lbl">Projected Annual Income</div>
+      <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:26,marginTop:4}}>{fmt(d.total_projected_annual_income)}</div>
+    </div>}
+    {d.holdings.map(h=><div className="srow" key={h.ticker}>
+      <Avatar t={h.ticker}/>
+      <div style={{flex:1}}><b className="num">{h.ticker}</b>
+        <div className="meta">
+          {h.dividend_rate!=null?`${h.dividend_rate}/share`:"—"}
+          {h.dividend_yield!=null?` · ${h.dividend_yield}% yield`:""}
+          {h.ex_dividend_date?` · last ex-div ${h.ex_dividend_date}`:""}
+        </div></div>
+      {h.projected_annual_income!=null && <div className="num" style={{fontWeight:700}}>{fmt(h.projected_annual_income)}/yr</div>}
+    </div>)}
+    <p className="note" style={{marginTop:12}}>{d.note}</p>
+  </div>;
+}
+
 function Portfolio({state, dispatch}) {
   const {holdings, cash} = state;
   const [res,setRes] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
@@ -1544,6 +1581,8 @@ function Portfolio({state, dispatch}) {
         <p className="mut" style={{marginBottom:14}}>USD holdings converted at 1 USD = {res.usd_cad_rate} CAD</p>}
       {res && <p className="mut" style={{marginBottom:16}}>{res.summary}</p>}
 
+      {holdings.length>0 && <DividendTracker holdings={holdings}/>}
+
       {res?.concentration?.warnings?.length>0 && <div className="card">
         <h2>Concentration Risk</h2>
         {res.concentration.effective_positions!=null &&
@@ -1677,6 +1716,65 @@ const ALERT_CONDITIONS = [
   ["price_below","Price drops below"], ["price_above","Price rises above"],
 ];
 const alertConditionLabel = k => (ALERT_CONDITIONS.find(([key])=>key===k)||[])[1] || k;
+
+function WatchlistBacktestCard({holdings, watchlist, dispatch}) {
+  const tickers = useMemo(() => {
+    const set = new Set([...(holdings||[]).map(h=>h.ticker), ...(watchlist||[])]);
+    return [...set];
+  }, [holdings, watchlist]);
+
+  const [d,setD] = useState(null), [busy,setBusy] = useState(false), [err,setErr] = useState(null);
+  const [ran,setRan] = useState(false);
+
+  // Opt-in, not auto-fetched on load — this is a 2-year backtest across
+  // every ticker you hold or watch, a heavier ask than the rest of Brief's
+  // already-cached scan, so it only runs when asked for, same "Run
+  // backtest" pattern as the single-ticker version on Analyze.
+  const run = () => {
+    if (tickers.length===0 || busy) return;
+    setBusy(true); setErr(null); setRan(true);
+    api("/api/backtest/watchlist", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tickers})}).then(setD).catch(e=>setErr(e.message)).finally(()=>setBusy(false));
+  };
+
+  const edgeColor = v => v==null ? "var(--text)" : v>0 ? "var(--green)" : v<0 ? "var(--red)" : "var(--text)";
+
+  return <div className="card">
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <h2 style={{marginBottom:0}}>Has This Worked On My Stocks?</h2>
+      {tickers.length>0 && !busy && <button className="link" onClick={run}>{ran?"Re-run":"Run backtest"}</button>}
+    </div>
+    <p className="mut" style={{marginTop:6}}>Checks this app's own BUY/SELL signal against 2 years of real
+      history for every ticker you hold or watch — what actually would have happened, not a projection.</p>
+    {tickers.length===0 && <p className="note">Add holdings or watchlist tickers first.</p>}
+    {busy && <Spin t="Backtesting your tickers…"/>}
+    {err && <div className="err"><b>Couldn't run backtest</b>{err}</div>}
+    {!busy && !err && d && <>
+      {d.tested.length>0 && <div style={{display:"flex",gap:20,marginBottom:16,flexWrap:"wrap"}}>
+        <div><div className="lbl">Overall Win Rate</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4}}>
+            {d.overall_buy_win_rate!=null?`${d.overall_buy_win_rate}%`:"—"}</div></div>
+        <div><div className="lbl">Overall Edge (10d)</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4,color:edgeColor(d.overall_buy_edge_10d)}}>
+            {d.overall_buy_edge_10d!=null?`${d.overall_buy_edge_10d>0?"+":""}${d.overall_buy_edge_10d}%`:"—"}</div></div>
+        <div><div className="lbl">Total Signals</div>
+          <div style={{fontFamily:"var(--font-display)",fontWeight:400,fontSize:24,marginTop:4}}>{d.overall_buy_events}</div></div>
+      </div>}
+      {d.tested.length===0 && <p className="mut">None of these tickers had enough history to backtest.</p>}
+      {d.tested.map(t=><div className="srow" key={t.ticker} onClick={()=>dispatch({type:"analyze", ticker:t.ticker})}>
+        <Avatar t={t.ticker}/>
+        <div style={{flex:1}}><b className="num">{t.ticker}</b>
+          <div className="meta">{t.buy_events} buy signal{t.buy_events===1?"":"s"}
+            {t.buy_win_rate!=null?` · ${t.buy_win_rate}% won`:""}
+            {t.buy_edge_10d!=null?` · ${t.buy_edge_10d>0?"+":""}${t.buy_edge_10d}% edge`:""}</div></div>
+        {t.buy_edge_10d!=null && <div className="num" style={{fontWeight:700,color:edgeColor(t.buy_edge_10d)}}>
+          {t.buy_edge_10d>0?"+":""}{t.buy_edge_10d}%</div>}
+      </div>)}
+      {d.skipped.length>0 && <p className="mut" style={{marginTop:10,fontSize:11.5}}>Couldn't backtest: {d.skipped.join(", ")}</p>}
+      <p className="note" style={{marginTop:12}}>{d.note}</p>
+    </>}
+  </div>;
+}
 
 function Brief({state, dispatch}) {
   const {holdings, watchlist, scanTickers, setScanTickers, priceAlerts, setPriceAlerts} = state;
@@ -1904,6 +2002,8 @@ function Brief({state, dispatch}) {
         <p className="note">A fixed list of TSX/TSX-V names commonly under CAD $20 — not the whole exchange.
           "Avoid" means negative momentum now, not a judgment on the business.</p>
       </div>}
+      <WatchlistBacktestCard holdings={holdings} watchlist={watchlist} dispatch={dispatch}/>
+
       <div className="card"><p className="mut">{d.note}</p></div>
     </>}
   </>;
