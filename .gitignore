@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Screener v2's append-only emission log — runtime data, never source.
+# Point SCREENER_V2_LOG_PATH at a persistent disk before a validation run.
+screener_v2_log.jsonl
+*.jsonl
