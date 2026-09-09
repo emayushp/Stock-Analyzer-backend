@@ -179,7 +179,7 @@ def test_calibration_buckets_populate_from_emissions():
         rows[0]["listing_used"], rows[0]["timestamp"],
         actual_fill_price=100.0, extension_atr_at_fill=0.75,
     )
-    calibration._append([{
+    calibration.append_rows([{
         "kind": "forward", "id": rows[0]["id"],
         "fwd_return_5d": 2.5, "fwd_return_10d": 4.0, "fwd_return_20d": -1.0,
     }])

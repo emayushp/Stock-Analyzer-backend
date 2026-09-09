@@ -58,6 +58,34 @@ class UserData(Base):
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_data_user_id_key"),)
 
 
+class ScreenerV2Log(Base):
+    """
+    Append-only emission log for the v2 screener (screener_v2/calibration.py).
+
+    Not per-user: this is the app's own record of what the screener emitted
+    and how those candidates went, which is what sets the extension veto
+    threshold. It lives in Postgres rather than on disk because Render's
+    web-service filesystem is wiped on every deploy, and a validation run
+    that resets whenever you ship is not a validation run.
+
+    Deliberately row-per-event rather than one mutable row per candidate:
+    an emission, a later fill, and a later forward-return backfill are three
+    separate appends sharing a row_key, and calibration.py merges them on
+    read. Nothing is ever updated in place, so a bug in the backfill can't
+    corrupt the original emission record.
+
+    Created automatically by Base.metadata.create_all() on first connection
+    — no migration step.
+    """
+    __tablename__ = "screener_v2_log"
+    id = Column(Integer, primary_key=True)
+    row_key = Column(String, nullable=False, index=True)   # "SYMBOL@emission_timestamp"
+    symbol = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)      # emission | fill | forward
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 _engine = None
 _SessionLocal = None
 _unavailable_logged = False

@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import catalysts, config, pipeline, universe
+from . import calibration, catalysts, config, pipeline, universe
 from .provider import YFinanceProvider
 from .schemas import ScanResult
 
@@ -158,6 +158,9 @@ def status() -> Dict[str, Any]:
         "scan_watchlist": len(cached.watchlist_only) if cached else 0,
         "last_catalyst_refresh": _last_catalyst_refresh or None,
         "catalysts": catalysts.cache_status(),
+        # "postgres" means the parallel run's data survives deploys; a
+        # "jsonl:" value means it does not.
+        "calibration_sink": calibration.active_sink(),
     }
 
 

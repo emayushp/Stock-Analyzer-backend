@@ -12,30 +12,30 @@ it. Do not retune it from intuition, and do not retune the ranking weights
 against last month's winners either — both are explicitly listed as
 anti-patterns (spec §14).
 
-DURABILITY WARNING: this writes JSONL to config.LOG_PATH. Render's
-web-service filesystem is ephemeral and is wiped on every deploy, so a
-30-session parallel run (spec §13) will NOT survive unless
-SCREENER_V2_LOG_PATH points at a mounted persistent disk. Set it before
-starting the validation run, or the data you are validating on will
-silently disappear at the next deploy. Moving the sink to the app's
-optional Postgres is the documented upgrade path.
+STORAGE lives in log_store.py: Postgres whenever DATABASE_URL is
+configured, JSONL at config.LOG_PATH otherwise. That matters here only
+because Render wipes the filesystem on every deploy, so a file-backed log
+cannot survive the 30-session parallel run this table exists to serve.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from . import config
+from . import log_store
 from .schemas import CalibrationReport, Candidate, ExtensionBucket
 
 logger = logging.getLogger("stock-analyzer")
 
-_write_lock = threading.Lock()
+# Storage is log_store's job; these are re-exported so callers and tests
+# have one import for the whole log.
+active_sink = log_store.active_sink
+read_rows = log_store.read_rows
+append_rows = log_store.append
 
+# The review table's rows. These stop at the veto threshold on purpose:
+# anything at or above it was never orderable, so it has no fill to bucket.
 BUCKETS = (
     ("<0", None, 0.0),
     ("0-0.5", 0.0, 0.5),
@@ -93,28 +93,10 @@ def _flatten(candidate: Candidate) -> Dict[str, Any]:
     }
 
 
-def _append(rows: List[Dict[str, Any]]) -> int:
-    if not rows:
-        return 0
-    try:
-        path = config.LOG_PATH
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with _write_lock:
-            with open(path, "a", encoding="utf-8") as handle:
-                for row in rows:
-                    handle.write(json.dumps(row, default=str) + "\n")
-        return len(rows)
-    except Exception as e:
-        logger.error(f"screener_v2: could not append to the emission log: {e}")
-        return 0
-
-
 def log_candidates(candidates: List[Candidate]) -> int:
     """Append every emitted candidate. Watchlist rows are logged too: what
     the veto excluded is exactly the comparison the bucket table needs."""
-    return _append([_flatten(c) for c in candidates])
+    return append_rows([_flatten(c) for c in candidates])
 
 
 def record_fill(
@@ -127,7 +109,7 @@ def record_fill(
 
     Append-only: this writes a new row rather than rewriting the emission,
     and review() merges the two by id."""
-    return _append([{
+    return append_rows([{
         "kind": "fill",
         "id": row_id(symbol, generated_at),
         "symbol": (symbol or "").upper(),
@@ -135,28 +117,6 @@ def record_fill(
         "actual_fill_price": actual_fill_price,
         "extension_atr_at_fill": extension_atr_at_fill,
     }]) > 0
-
-
-def read_rows() -> List[Dict[str, Any]]:
-    """Every row in the log, oldest first. A corrupt line is skipped rather
-    than taking down the whole read."""
-    path = config.LOG_PATH
-    if not os.path.exists(path):
-        return []
-    rows: List[Dict[str, Any]] = []
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.error(f"screener_v2: could not read the emission log: {e}")
-    return rows
 
 
 def _merged() -> Dict[str, Dict[str, Any]]:
@@ -210,7 +170,7 @@ def backfill_forward_returns(
             payload.update({"kind": "forward", "id": row_key})
             new_rows.append(payload)
             written += 1
-    _append(new_rows)
+    append_rows(new_rows)
     return written
 
 
@@ -286,7 +246,7 @@ def review(prefer_fills: bool = True) -> CalibrationReport:
         buckets=buckets,
         logged_rows=len(merged),
         rows_with_forward_returns=with_returns,
-        sink=config.LOG_PATH,
+        sink=active_sink(),
         note=(
             "Mean and median forward return by extension-at-entry. This is the "
             "measurement that sets the veto threshold — move it on this table, not "
