@@ -35,6 +35,9 @@ from sqlalchemy.exc import IntegrityError
 
 import auth as auth_lib
 import db as db_lib
+from screener_v2 import config as screener_v2_config
+from screener_v2 import runtime as screener_v2_runtime
+from screener_v2.router import router as screener_v2_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stock-analyzer")
@@ -6039,11 +6042,62 @@ _BACKGROUND_REFRESH_ENABLED = os.environ.get("DISABLE_BACKGROUND_REFRESH", "").l
 _BACKGROUND_REFRESH_TICK_SECONDS = 60
 
 
+# ===========================================================================
+# SCREENER V2 WIRING
+#
+# The v2 screener lives entirely in screener_v2/ — see that package's
+# __init__ for what it is and the invariants it must never break. Everything
+# below is wiring only: adapters handing it this file's Stocklake fetchers,
+# the router include, and job ticks on the existing background thread. No v2
+# logic belongs in this file (it is 6,000 lines and edited from a phone).
+#
+# v2 runs alongside the existing momentum screener and is off by default;
+# SCREENER_V2_ENABLED gates every scan endpoint and every job below.
+# ===========================================================================
+def _v2_stock_payloads(symbols: List[str]) -> Dict[str, Any]:
+    try:
+        return _stocklake_batch_stocks(list(symbols))
+    except Exception as e:
+        logger.error(f"screener_v2: batch stock fetch failed: {e}")
+        return {}
+
+
+def _v2_market_caps(symbols: List[str]) -> Dict[str, Optional[float]]:
+    payloads = _v2_stock_payloads(symbols)
+    return {s: (payloads.get(s) or {}).get("market_cap") for s in symbols}
+
+
+def _v2_insider(symbol: str) -> Any:
+    # Only for symbols Stocklake can be looked up under directly. A
+    # suffix-stripped Canadian ticker carries the wrong-company
+    # substitution risk validate_stocklake_stock exists to catch, and an
+    # insider "cluster buy" attributed to the wrong company would be a
+    # scoring bonus built on someone else's filings.
+    if _stocklake_symbol(symbol) != symbol:
+        return None
+    context = fetch_stocklake_context(
+        symbol, {"insider": ("get_insider_activity", {"symbol": symbol})}
+    )
+    return context.get("insider")
+
+
+screener_v2_runtime.configure(
+    SCREENER_UNIVERSE,
+    market_cap_lookup=_v2_market_caps,
+    insider_fetcher=_v2_insider,
+    stock_fetcher=_v2_stock_payloads,
+)
+app.include_router(screener_v2_router)
+
+
 def _background_refresh_loop() -> None:
     # Small startup delay so this doesn't compete with the app's own
     # first-request warm-up for the same worker/network resources.
     time.sleep(5)
-    last_run = {"screener": 0.0, "under20": 0.0, "regime": 0.0}
+    last_run = {
+        "screener": 0.0, "under20": 0.0, "regime": 0.0,
+        "v2_universe": 0.0, "v2_scan": 0.0, "v2_catalysts": 0.0,
+    }
     while True:
         now = time.time()
         if now - last_run["screener"] >= _SCREENER_TTL_SECONDS:
@@ -6065,6 +6119,30 @@ def _background_refresh_loop() -> None:
             except Exception as e:
                 logger.error(f"Background refresh failed (market regime): {e}")
             last_run["regime"] = time.time()
+
+        # Screener v2 jobs, in dependency order: the universe feeds the
+        # scan, and the catalyst job is scoped to whatever that scan
+        # surfaced. All three are no-ops while the flag is off.
+        if screener_v2_config.screener_v2_enabled():
+            if now - last_run["v2_universe"] >= screener_v2_config.UNIVERSE_TTL_SECONDS:
+                try:
+                    screener_v2_runtime.refresh_universe()
+                except Exception as e:
+                    logger.error(f"Background refresh failed (screener_v2 universe): {e}")
+                last_run["v2_universe"] = time.time()
+            if now - last_run["v2_scan"] >= screener_v2_config.SCAN_TTL_SECONDS:
+                try:
+                    screener_v2_runtime.run_scan(force=True)
+                except Exception as e:
+                    logger.error(f"Background refresh failed (screener_v2 scan): {e}")
+                last_run["v2_scan"] = time.time()
+            if now - last_run["v2_catalysts"] >= screener_v2_config.CATALYST_REFRESH_INTERVAL_SECONDS:
+                try:
+                    screener_v2_runtime.refresh_catalysts()
+                except Exception as e:
+                    logger.error(f"Background refresh failed (screener_v2 catalysts): {e}")
+                last_run["v2_catalysts"] = time.time()
+
         time.sleep(_BACKGROUND_REFRESH_TICK_SECONDS)
 
 
