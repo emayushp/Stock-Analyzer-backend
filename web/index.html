@@ -2460,11 +2460,123 @@ function StocklakeScreener({dispatch}) {
   </>;
 }
 
+/* ===== Pre-move (screener v2) =====
+   Reads /api/v2/screener, which is cache-only — the background job builds
+   the scan, so this never triggers a multi-minute download by rendering.
+
+   Deliberately shows the entry target as the headline number rather than
+   the last price: the whole point of this screen is that selection ends
+   with a resting limit order, not a market fill. */
+// Prices come back rounded to 2dp, but JSON drops trailing zeros, so 396.00
+// arrives as 396 and would render as a price missing its cents.
+const money = v => v == null ? "—" : Number(v).toFixed(2);
+
+function PremoveCard({c, dispatch}) {
+  const e = c.entry || {}, k = c.compression || {}, s = c.strength || {}, cat = c.catalysts || {};
+  const flags = [
+    s.accumulating && "Accumulating",
+    cat.insider_cluster_buy && "Insider cluster",
+    e.already_broke_out && "Awaiting retest",
+  ].filter(Boolean);
+
+  return <div className="card" style={{borderTop:"4px solid var(--green)",cursor:"pointer",marginBottom:0}}
+    onClick={()=>dispatch({type:"analyze", ticker:c.listing_used||c.symbol})}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:9}}>
+        <Avatar t={c.listing_used||c.symbol}/>
+        <b className="num" style={{fontSize:14}}>{c.listing_used||c.symbol}</b>
+      </div>
+      {c.score!=null && <span className="mini" style={{background:"var(--accentBg)",color:"var(--accent)"}}>{Math.round(c.score)}</span>}
+    </div>
+
+    <div className="lbl" style={{marginBottom:2}}>Buy limit at</div>
+    <div style={{fontFamily:"var(--mono)",fontWeight:600,fontSize:22}}>{money(e.entry_target)}</div>
+
+    <div className="row" style={{paddingTop:10}}>
+      <span>Stop</span><span>{money(e.stop)}</span>
+    </div>
+    <div className="row"><span>Risk</span><span>{e.r_pct!=null?`${Number(e.r_pct).toFixed(1)}%`:"—"}</span></div>
+    <div className="row"><span>Shares</span><span>{e.shares ?? "—"}</span></div>
+
+    {flags.length>0 && <div className="chips" style={{margin:"10px 0 0"}}>
+      {flags.map(f=><span key={f} className="mini" style={{background:"var(--greenBg)",color:"var(--greenText)"}}>{f}</span>)}
+    </div>}
+
+    <div className="rule"/>
+    <div className="lbl" style={{marginBottom:4}}>Why it qualified</div>
+    <p className="mut" style={{marginBottom:4}}>{k.reason}</p>
+    <p className="mut">{s.reason}</p>
+    {cat.available===false && <p className="note">No catalyst data cached for this name yet.</p>}
+  </div>;
+}
+
+function PremoveWatchRow({c, dispatch}) {
+  return <div className="srow" onClick={()=>dispatch({type:"analyze", ticker:c.listing_used||c.symbol})}>
+    <Avatar t={c.listing_used||c.symbol}/>
+    <div style={{flex:1}}>
+      <b className="num">{c.listing_used||c.symbol}</b>
+      <div className="meta">{c.watchlist_reason || "watchlist only"}</div>
+    </div>
+  </div>;
+}
+
+function PremoveScreener({dispatch}) {
+  const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
+
+  useEffect(()=>{
+    let dead = false;
+    setBusy(true); setErr(null);
+    api("/api/v2/screener").then(j=>{ if(!dead) setD(j); })
+      .catch(e=>{ if(!dead) setErr(e.message); })
+      .finally(()=>{ if(!dead) setBusy(false); });
+    return ()=>{ dead = true; };
+  },[]);
+
+  if (busy) return <Spin t="Loading pre-move candidates…"/>;
+
+  // The flag being off is an ordinary state, not a failure — say so plainly
+  // rather than showing a red error box.
+  if (err) return /screener v2 is off/i.test(err)
+    ? <div className="center"><h3>Pre-move is switched off</h3>
+        <p>Set SCREENER_V2_ENABLED=true on the server to run it alongside the other screens.</p></div>
+    : <div className="err"><b>Couldn't load pre-move candidates</b>{err}</div>;
+
+  if (!d) return null;
+  const candidates = d.candidates || [], watchlist = d.watchlist_only || [];
+
+  return <>
+    <p className="note" style={{marginTop:0,marginBottom:18}}>{d.note}</p>
+
+    {candidates.length===0 && watchlist.length===0
+      ? <div className="center"><h3>Nothing coiled right now</h3>
+          <p>An empty list is a normal result here — a name has to be compressed, untrending,
+             above its 200-day and turning up on relative strength before it qualifies.</p></div>
+      : <>
+        {candidates.length>0 && <>
+          <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:12}}>
+            <h2 style={{marginBottom:0,fontSize:17}}>Candidates</h2>
+            <span className="mini" style={{background:"var(--greenBg)",color:"var(--greenText)"}}>{candidates.length}</span>
+          </div>
+          <div className="grid" style={{marginBottom:8}}>
+            {candidates.map(c=><PremoveCard key={(c.listing_used||c.symbol)+c.generated_at} c={c} dispatch={dispatch}/>)}
+          </div>
+        </>}
+
+        {watchlist.length>0 && <div className="card" style={{marginTop:22}}>
+          <h2>Watchlist only</h2>
+          <p className="mut" style={{marginBottom:10}}>Good setups at the wrong price, or too close to
+            earnings. No order is generated for these.</p>
+          {watchlist.map(c=><PremoveWatchRow key={(c.listing_used||c.symbol)+c.generated_at} c={c} dispatch={dispatch}/>)}
+        </div>}
+      </>}
+  </>;
+}
+
 function Screener({dispatch}) {
-  // Two modes (Stocklake-first plan, P3 — was three: Fixed Universe, High
-  // Volume, Discover. High Volume folded into Discover's "Most Active"
-  // sort, since Stocklake's own screener already supports sort_by=volume).
-  const [source,setSource] = useState("universe"); // "universe" | "stocklake"
+  // Three modes: the two existing scans plus Pre-move (screener v2), which
+  // is a separate subsystem behind SCREENER_V2_ENABLED and runs alongside
+  // these rather than replacing either.
+  const [source,setSource] = useState("universe"); // "universe" | "stocklake" | "premove"
   const [d,setD] = useState(null), [busy,setBusy] = useState(true), [err,setErr] = useState(null);
 
   useEffect(()=>{
@@ -2483,11 +2595,12 @@ function Screener({dispatch}) {
       <div className="tag" style={{marginTop:3}}>Scanned candidates · buy & sell signals</div></div>
 
     <div className="chips" style={{marginBottom:10}}>
-      {[["universe","Your Scan"],["stocklake","Browse the Market"]].map(([k,l])=>
+      {[["universe","Your Scan"],["stocklake","Browse the Market"],["premove","Pre-move"]].map(([k,l])=>
         <div key={k} className={"chip"+(source===k?" on":"")} onClick={()=>setSource(k)}>{l}</div>)}
     </div>
 
-    {source==="stocklake" ? <StocklakeScreener dispatch={dispatch}/> : <>
+    {source==="premove" ? <PremoveScreener dispatch={dispatch}/> :
+     source==="stocklake" ? <StocklakeScreener dispatch={dispatch}/> : <>
     {busy && <Spin t="Scanning universe…"/>}
     {err && <div className="err"><b>Couldn't load screener</b>{err}</div>}
     {!busy && !err && d && <>
