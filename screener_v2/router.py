@@ -10,6 +10,7 @@ with a restart instead of a code change.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -40,12 +41,33 @@ def status():
 
 
 @router.get("", response_model=ScanResult)
-def scan(force: bool = Query(False, description="Re-download and re-scan instead of serving the cache")):
+def scan(force: bool = Query(False, description="Run a scan now instead of serving the cache")):
+    """Cache-only by default.
+
+    A full scan downloads bars for the whole universe and takes minutes, so
+    it must never happen inside a request — that is the same rule the v1
+    screener already follows after a live-fetch-on-read path took the app
+    down. The background job fills the cache within a minute of startup and
+    refreshes it hourly; until then this reports that plainly rather than
+    making the caller wait for a scan it didn't ask for.
+
+    `force=true` is the deliberate escape hatch and will block for minutes."""
     _require_flag()
     if not runtime.is_configured():
         raise HTTPException(status_code=503, detail="Screener v2 has no universe configured yet.")
     try:
-        return runtime.run_scan(force=force)
+        if force:
+            return runtime.run_scan(force=True)
+        cached = runtime.cached_scan()
+        if cached is not None:
+            return cached
+        return ScanResult(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            note=(
+                "The first scan hasn't run yet. The background job builds it within a "
+                "minute of startup and refreshes it hourly — check back shortly."
+            ),
+        )
     except Exception as e:
         logger.error(f"screener_v2: scan failed: {e}")
         raise HTTPException(status_code=502, detail="The v2 scan couldn't complete right now.")

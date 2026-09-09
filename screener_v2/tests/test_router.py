@@ -51,11 +51,37 @@ def test_scan_runs_with_the_flag_on():
     flag_on()
     canned = ScanResult(universe_size=3, scanned=3, note="ok", generated_at="2026-01-01T00:00:00Z")
     with patch.object(runtime, "is_configured", return_value=True), \
-         patch.object(runtime, "run_scan", return_value=canned) as scan:
+         patch.object(runtime, "cached_scan", return_value=canned) as scan:
         response = client.get("/api/v2/screener")
     assert response.status_code == 200
     assert response.json()["scanned"] == 3
     assert scan.called
+    flag_off()
+
+
+def test_scan_is_cache_only_and_never_scans_in_the_request():
+    """A cold cache must report that plainly rather than running a
+    multi-minute universe download inside the request."""
+    flag_on()
+    with patch.object(runtime, "is_configured", return_value=True), \
+         patch.object(runtime, "cached_scan", return_value=None), \
+         patch.object(runtime, "run_scan") as run_scan:
+        response = client.get("/api/v2/screener")
+    assert response.status_code == 200
+    assert "hasn't run yet" in response.json()["note"]
+    assert not run_scan.called, "reading the screen must never trigger a scan"
+    flag_off()
+
+
+def test_force_is_the_explicit_escape_hatch():
+    flag_on()
+    canned = ScanResult(scanned=7, note="forced", generated_at="2026-01-01T00:00:00Z")
+    with patch.object(runtime, "is_configured", return_value=True), \
+         patch.object(runtime, "run_scan", return_value=canned) as run_scan:
+        response = client.get("/api/v2/screener?force=true")
+    assert response.status_code == 200
+    assert response.json()["scanned"] == 7
+    run_scan.assert_called_once_with(force=True)
     flag_off()
 
 
